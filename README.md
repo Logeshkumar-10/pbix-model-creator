@@ -1,15 +1,14 @@
 # Enterprise PBIX Model Builder
 
-> \*\*A Claude AI skill that builds fully modelled Power BI semantic models for enterprise planning datasets.\*\*
+> A Claude AI skill that builds fully modelled Power BI semantic models for enterprise planning datasets.
 
-[!\[Author](https://img.shields.io/badge/Author-Logeshkumar%20Sivakumar-blue)](mailto:elogu2001@outlook.com)
-[!\[License](https://img.shields.io/badge/License-Proprietary-red)](./LICENSE)
-[!\[Version](https://img.shields.io/badge/Version-2.0-green)](./enterprise-pbix-model-builder.md)
-[!\[Platform](https://img.shields.io/badge/Platform-Claude%20AI-orange)](https://claude.ai)
+**Designed and Developed by Logeshkumar Sivakumar**
+**Contact: elogu2001@outlook.com**
+**© 2026 Logeshkumar Sivakumar. All rights reserved.**
 
-\---
+---
 
-## What It Does
+## What This Skill Does
 
 This skill turns a raw enterprise planning dataset - or an existing PBIX file - into a deployment-ready Power BI semantic model in a single session.
 
@@ -24,7 +23,7 @@ It generates a `model.bim` file (Tabular Editor compatible) containing:
 
 The measures, folder names, and DAX formulas are **fully dynamic** - driven by the actual industry, real `DimScenario` values, `DimAccount` structure, and operational column names read from the dataset. No hardcoded strings. No generic `KPI \& Ratios` folders.
 
-\---
+---
 
 ## Two Input Modes
 
@@ -33,7 +32,7 @@ The measures, folder names, and DAX formulas are **fully dynamic** - driven by t
 |**Mode 1 - Integrated**|Immediately after running the Enterprise Dataset Creator skill|CSV files + documentation guides. Carries industry, company, and column names forward automatically.|
 |**Mode 2 - Standalone**|When uploading an existing PBIX or description document|Parses the PBIX `DiagramLayout` for table names. Resolves descriptions from uploaded docs or the built-in catalogue.|
 
-\---
+---
 
 ## Output Files (All Generated in One Run)
 
@@ -45,8 +44,97 @@ The measures, folder names, and DAX formulas are **fully dynamic** - driven by t
 |`\[industry]\_model\_guide\_internal.md`|Technical reference - full DAX, relationship map, column visibility, deployment notes|
 |`measures\_reference.md`|All measures by folder - name, format, description, DAX formula|
 
-\---
+---
 
+## Installation
+
+This skill uses the Claude Skills system. To install it:
+
+1. Rename the downloaded file to 'SKILL.md' and copy it to your Claude skills directory:
+
+```
+/mnt/skills/user/enterprise-pbix-model-builder/SKILL.md
+```
+
+2. The skill is auto-detected when Claude starts. No restart required.
+
+3. Trigger it in any conversation with one of the phrases below.
+
+---
+
+## How to Use
+
+### Mode 1 - After Running Enterprise Dataset Creator
+
+If you have just generated a dataset with the [Enterprise Dataset Creator](https://github.com/logeshkumar/enterprise-planning-dataset-creator) skill in the same Claude session, simply invoke this skill:
+
+```
+Build the Power BI model from the generated dataset.
+Use cases: Variance Analysis, YTD, Forecasting, Therapy Area Ranking.
+Primary user: FP\&A Analyst.
+```
+
+The skill detects the generated files automatically and asks only two questions: use cases and end user persona.
+
+### Mode 2 - From an Existing PBIX
+
+Upload your `.pbix` file (and optionally a description document) and invoke the skill:
+
+```
+Model my uploaded PBIX.
+Industry: Branded Pharmaceutical.
+Use cases: Variance, YTD, Forecasting, Scenario Comparison.
+Primary user: CFO.
+```
+
+---
+
+## Deploying the Generated BIM to Power BI Desktop
+
+```
+1. Run build\_model.py  →  model.bim is generated
+2. Open model.bim in Tabular Editor 2
+3. Edit the DatasetFolder expression - update the CSV folder path
+4. Press Ctrl+S  (mandatory before deploying)
+5. Model → Deploy to Power BI Desktop
+6. Select your running Power BI Desktop instance → OK
+7. Switch to Power BI Desktop → Home → Refresh
+8. Fields pane → Measure table → verify display folders
+```
+
+### DatasetFolder Path Format
+
+In the BIM file, Locate the path to dataset in local system. The path must use double backslashes. 
+```json
+"expression": "\\"D:\\\\\\\\Projects\\\\\\\\Dataset\\" meta \[IsParameterQuery=true, Type=\\"Text\\", IsParameterQueryRequired=true]"
+```
+
+---
+
+## BIM Compatibility
+
+|Property|Value|
+|-|-|
+|`compatibilityLevel`|`1600`|
+|`defaultPowerBIDataSourceVersion`|`PowerBI\_V3`|
+|`discourageImplicitMeasures`|`true`|
+|`linguisticMetadata` / `cultures`|Not included|
+|Tabular Editor 2|Fully supported|
+|Tabular Editor 3|Fully supported|
+|Power BI Pro / Premium / Fabric|Compatible|
+
+---
+
+## Design Principles
+
+* **Industry-native, not generic** - folder names and measure names use the terminology of the specific industry
+* **Reads data before writing code** - reads actual scenario names, account types, and column names from CSVs before generating any DAX
+* **Descriptions on everything** - every table, column, and measure carries a `description` property in the BIM
+* **`PBI\_FormatHint` on all measures** - ensures Power BI Desktop respects the `formatString` and does not auto-format
+* **No reconciliation measures** - every measure answers a business question
+* **No `linguisticMetadata`** - removed to prevent compatibility issues
+
+---
 ## Industries - Fully Dynamic
 
 The skill does not have a fixed list of supported industries. It works for **any industry** by researching the industry's standard terminology, KPI vocabulary, and account structure at generation time.
@@ -75,7 +163,7 @@ The industry name you provide drives everything - folder names, measure names, D
 |Operations Manager|Operational - `OEE %`, `Cost per Unit`, `Utilisation %`|Throughput and cost efficiency|
 |Investor / Board|Finance-standard - `EBITDA`, `ROIC`, `FCF`, `EPS`|Profitability and capital efficiency|
 
-\---
+---
 
 ## Prerequisites
 
@@ -86,92 +174,7 @@ The industry name you provide drives everything - folder names, measure names, D
 |[Power BI Desktop](https://powerbi.microsoft.com)|The report layer|Free|
 |Python 3.10+|Runs `build\_model.py` to generate the BIM|Free|
 
-\---
-
-## How to Install the Skill
-
-1. Download `enterprise-pbix-model-builder.md` from this repository
-2. Open [claude.ai](https://claude.ai)
-3. Go to **Settings → Skills**
-4. Click **Upload skill** and select the `.md` file
-5. The skill is now available in all your conversations
-
-\---
-
-## How to Use
-
-### Mode 1 - After Running Enterprise Dataset Creator
-
-If you have just generated a dataset with the [Enterprise Dataset Creator](https://github.com/logeshkumar/enterprise-planning-dataset-creator) skill in the same Claude session, simply invoke this skill:
-
-```
-Build the Power BI model from the generated dataset.
-Use cases: Variance Analysis, YTD, Forecasting, Therapy Area Ranking.
-Primary user: FP\&A Analyst.
-```
-
-The skill detects the generated files automatically and asks only two questions: use cases and end user persona.
-
-### Mode 2 - From an Existing PBIX
-
-Upload your `.pbix` file (and optionally a description document) and invoke the skill:
-
-```
-Model my uploaded PBIX.
-Industry: Branded Pharmaceutical.
-Use cases: Variance, YTD, Forecasting, Scenario Comparison.
-Primary user: CFO.
-```
-
-\---
-
-## Deploying the Generated BIM to Power BI Desktop
-
-```
-1. Run build\_model.py  →  model.bim is generated
-2. Open model.bim in Tabular Editor 2
-3. Edit the DatasetFolder expression - update the CSV folder path
-4. Press Ctrl+S  (mandatory before deploying)
-5. Model → Deploy to Power BI Desktop
-6. Select your running Power BI Desktop instance → OK
-7. Switch to Power BI Desktop → Home → Refresh
-8. Fields pane → Measure table → verify display folders
-```
-
-### DatasetFolder Path Format
-
-In the BIM file, the path must use double backslashes:
-
-```json
-"expression": "\\"D:\\\\\\\\Projects\\\\\\\\Dataset\\" meta \[IsParameterQuery=true, Type=\\"Text\\", IsParameterQueryRequired=true]"
-```
-
-\---
-
-## BIM Compatibility
-
-|Property|Value|
-|-|-|
-|`compatibilityLevel`|`1600`|
-|`defaultPowerBIDataSourceVersion`|`PowerBI\_V3`|
-|`discourageImplicitMeasures`|`true`|
-|`linguisticMetadata` / `cultures`|Not included|
-|Tabular Editor 2|Fully supported|
-|Tabular Editor 3|Fully supported|
-|Power BI Pro / Premium / Fabric|Compatible|
-
-\---
-
-## Design Principles
-
-* **Industry-native, not generic** - folder names and measure names use the terminology of the specific industry
-* **Reads data before writing code** - reads actual scenario names, account types, and column names from CSVs before generating any DAX
-* **Descriptions on everything** - every table, column, and measure carries a `description` property in the BIM
-* **`PBI\_FormatHint` on all measures** - ensures Power BI Desktop respects the `formatString` and does not auto-format
-* **No reconciliation measures** - every measure answers a business question
-* **No `linguisticMetadata`** - removed to prevent compatibility issues
-
-\---
+---
 
 ## Example - What Dynamic Output Looks Like (Pharma)
 
@@ -204,32 +207,41 @@ Display folders generated:
 11 | Therapy Area \& Product Ranking
 12 | Navigation \& Labels
 ```
-
-\---
+---
 
 ## Related Skills
 
 * [**Enterprise Planning Dataset Creator**](https://github.com/logeshkumar/enterprise-planning-dataset-creator) - generates the dataset that feeds into this skill (Mode 1)
 
-\---
+---
 
-## License
+## Changelog
 
-This skill is proprietary software. See [LICENSE](./LICENSE) for full terms.
+| Version | Date | Changes |
+|---|---|---|
+| 1.0 | May 2026 | Initial release - create PBIX model, build semantic model, add DAX measures, set up relationships, create BIM file, build Power BI model, model my uploaded PBIX |
 
-Personal, non-commercial use is permitted. Commercial use, redistribution, and publication of modified versions require written permission.
 
-For licensing enquiries: **elogu2001@outlook.com**
+---
 
-\---
+## Attribution and Copyright
 
-## Author
+```
+Demo Dataset Creator
+Designed and Developed by: Logeshkumar Sivakumar
+Contact: elogu2001@outlook.com
 
-**Logeshkumar Sivakumar**
-elogu2001@outlook.com
+© 2026 Logeshkumar Sivakumar. All rights reserved.
 
-> © 2026 Logeshkumar Sivakumar. All rights reserved.
-> This skill file, including the DAX architecture, measure design patterns, display folder structure,
-> relationship mapping logic, and documentation templates, is the original intellectual property
-> of Logeshkumar Sivakumar. Unauthorised reproduction or redistribution is prohibited.
+This skill, its schema design, realism engine, geographic and demographic modelling,
+seasonal event framework, and documentation are the original intellectual work of
+Logeshkumar Sivakumar. Unauthorised reproduction, redistribution, or commercial use
+without explicit written permission is prohibited.
+```
 
+Every Python script and documentation file generated by this skill includes the above
+attribution block automatically.
+
+---
+*© 2026 Logeshkumar Sivakumar. All rights reserved.*
+*elogu2001@outlook.com*
