@@ -1,4 +1,4 @@
-# Enterprise PBIX Model Builder
+# PBIX Model Builder
 
 > A Claude AI skill that builds fully modelled Power BI semantic models for enterprise planning datasets.
 
@@ -227,7 +227,7 @@ Display folders generated:
 ## Attribution and Copyright
 
 ```
-Demo Dataset Creator
+PBIX Model Builder
 Designed and Developed by: Logeshkumar Sivakumar
 Contact: elogu2001@outlook.com
 
