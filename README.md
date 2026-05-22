@@ -52,7 +52,7 @@ The measures, folder names, and DAX formulas are **fully dynamic** - driven by t
 
 This skill uses the Claude Skills system. To install it:
 
-1. Rename the downloaded file to 'SKILL.md' and copy it to your Claude skills directory:
+1. Copy 'SKILL.md' it to your Claude skills directory:
 
 ```
 /mnt/skills/user/enterprise-pbix-model-builder/SKILL.md
