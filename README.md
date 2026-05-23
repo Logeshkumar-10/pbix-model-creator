@@ -250,5 +250,3 @@ attribution block automatically.
 See LICENSE file for full terms.
 
 Copyright (c) 2026 Logesh Sivakumar. All rights reserved.
-
-Built with [Anthropic Claude](https://claude.ai)
