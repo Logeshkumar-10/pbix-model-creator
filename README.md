@@ -172,7 +172,7 @@ The industry name you provide drives everything - folder names, measure names, D
 |Tool|Purpose|Cost|
 |-|-|-|
 |[Claude](https://claude.ai)|The AI platform where the skill runs|Subscription required|
-|[Tabular Editor 2](https://tabulareditor.com)|Opens `model.bim` and deploys to Power BI Desktop|Free|
+|[Tabular Editor 2](https://tabulareditor.com)|Opens `model.bim` and deploys to Power BI Desktop|Free (30 Days Trial)|
 |[Power BI Desktop](https://powerbi.microsoft.com)|The report layer|Free|
 |Python 3.10+|Runs `build\_model.py` to generate the BIM|Free|
 
