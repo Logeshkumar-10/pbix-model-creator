@@ -169,6 +169,8 @@ In the BIM file, the path must use double backslashes:
 | `defaultPowerBIDataSourceVersion` | `PowerBI_V3` | Inside `model` object |
 | `discourageImplicitMeasures` | `true` | Inside `model` object |
 | Measure table anchor column | `_` (hidden, calculated) | `DATATABLE( "_", STRING, {{""}} )` |
+| Hierarchy naming convention | `[H] ` prefix on all hierarchies | `[H] Date`, `[H] Geography`, `[H] Account Hierarchy` |
+| Sort behaviour | `sortByColumn` applied to label columns | Months → Month Number, Quarter Label → Quarter, Account Name → Sort Order, Level N Name → Level N Key |
 | `linguisticMetadata` / `cultures` | Not included | — |
 | Tabular Editor 2 | Fully supported | — |
 | Tabular Editor 3 | Fully supported | — |
@@ -181,6 +183,9 @@ In the BIM file, the path must use double backslashes:
 - **Industry-native, not generic** — folder names and measure names use the terminology of the specific industry
 - **Reads data before writing code** — reads actual scenario names, account types, and column names from CSVs before generating any DAX
 - **Descriptions on everything** — every table, column, and measure carries a `description` property in the BIM
+- **Correct data type inference** — column types are resolved from name patterns (`infer_data_type()`), not pandas dtype inference. Keys → `int64`, dates → `dateTime`, amounts/rates → `double`, flag columns → `boolean`. Avoids the pandas default of typing all columns as `string` when reading zero-row CSV headers
+- **`[H]` prefixed hierarchies** — dimension tables (Account, Product, Geography, Date, Business Unit, Department, Customer, Supplier, Asset, Employee) automatically get named hierarchies. All hierarchy names start with `[H] ` so they are immediately identifiable in the Power BI field list
+- **Automatic `sortByColumn`** — label columns (Month Short Name, Quarter Label, Account Name in P&L order, hierarchy level names) get a `sortByColumn` property in the BIM so they sort correctly out of the box. No manual sort configuration in Power BI Desktop. Works for any dataset — known tables use the built-in `SORT_RULES` dict, unknown tables fall back to pattern-based detection (`X Label` → `X Number`, `X Short Name` → `X Number`)
 - **`PBI_FormatHint` on all measures** — ensures Power BI Desktop respects the `formatString` and does not auto-format
 - **No reconciliation measures** — every measure answers a business question
 - **No `linguisticMetadata`** — removed to prevent compatibility issues
@@ -230,7 +235,7 @@ Display folders generated:
 |---|---|---|
 | 1.0 | May 2026 | Initial release - create PBIX model, build semantic model, add DAX measures, set up relationships, create BIM file, build Power BI model, model my uploaded PBIX |
 | 2.0 | June 8 2026 | Structural Changes, Empty column to preserve measure table on refresh |
-
+| 3.0 | June 8 2026 | Added Column type detection Logic, Sorting Logic, Hierarchy Creation|
 ---
 
 ## Attribution and Copyright
