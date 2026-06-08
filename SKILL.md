@@ -7,7 +7,7 @@ description: >
   Applies descriptions to every table, column, and measure in the BIM.
   Generates industry-native DAX in numbered display folders — driven by actual DimScenario,
   DimAccount, and operational column names read from the dataset. No generic measure names.
-  No reconciliation measures. No linguisticMetadata. Uses PowerBI_V3 and discourageImplicitMeasures.
+  No reconciliation measures. No linguisticMetadata. Uses compatibilityLevel 1600, PowerBI_V3 and discourageImplicitMeasures inside model object.
   Mode 1 — Integrated: downstream of enterprise-planning-dataset-creator, reads CSVs and docs.
   Mode 2 — Standalone: parses uploaded PBIX and description markdown.
   Trigger: create PBIX model, build semantic model, add DAX measures, set up relationships,
@@ -1595,11 +1595,11 @@ Always use compatibility level `1550` (Power BI Premium / Pro compatible).
 ```json
 {
   "name": "[company]_[industry]_model",
-  "compatibilityLevel": 1550,
-  "defaultPowerBIDataSourceVersion": "PowerBI_V3",
-  "discourageImplicitMeasures": true,
+  "compatibilityLevel": 1600,
   "model": {
     "description": "[ATTRIBUTION BLOCK]",
+    "defaultPowerBIDataSourceVersion": "PowerBI_V3",
+    "discourageImplicitMeasures": true,
     "tables": [ ... ],
     "relationships": [ ... ],
     "expressions": [ ... ]
@@ -1611,9 +1611,9 @@ Always use compatibility level `1550` (Power BI Premium / Pro compatible).
 
 | Property | Correct Location | Wrong Location |
 |----------|-----------------|----------------|
-| `defaultPowerBIDataSourceVersion` | Root level (sibling of `"model"`) | ❌ Inside `"model"` object |
-| `discourageImplicitMeasures` | Root level (sibling of `"model"`) | ❌ Inside `"model"` object |
-| `compatibilityLevel` | Root level | ❌ Inside `"model"` object |
+| `defaultPowerBIDataSourceVersion` | Inside `"model"` object | ❌ Root level (sibling of `"model"`) |
+| `discourageImplicitMeasures` | Inside `"model"` object | ❌ Root level (sibling of `"model"`) |
+| `compatibilityLevel` | Root level (sibling of `"model"`) | ❌ Inside `"model"` object |
 | `"cultures"` / `linguisticMetadata` | **Never include** — causes compatibility errors | — |
 
 The value for `defaultPowerBIDataSourceVersion` must be `"PowerBI_V3"` — not `"powerBIDataSourceV3"` (the lowercase variant is rejected by Power BI Desktop).
@@ -1709,10 +1709,10 @@ Power BI Desktop requires the Measure table to have at least one column and a va
 ```json
 {
   "name": "Measure",
-  "description": "All DAX measures for this model. The _Measures column is a hidden placeholder — only the measures inside the display folders are visible to report users.",
+  "description": "All DAX measures for this model. The _ column is a hidden placeholder — only the measures inside the display folders are visible to report users.",
   "columns": [
     {
-      "name": "_Measures",
+      "name": "_",
       "dataType": "string",
       "isHidden": true,
       "columnOrigin": {
@@ -1731,7 +1731,7 @@ Power BI Desktop requires the Measure table to have at least one column and a va
       "mode": "import",
       "source": {
         "type": "calculated",
-        "expression": "DATATABLE( \"_Measures\", STRING, {{\"\"}} )"
+        "expression": "DATATABLE( \"_\", STRING, {{\"\"}} )"
       }
     }
   ],
@@ -1778,7 +1778,7 @@ Without the `PBI_FormatHint` annotation on measures, Power BI Desktop ignores th
 
 4. **Power BI Desktop not refreshed after deploy** — After a successful deploy, click **Refresh** in the Home ribbon in Power BI Desktop (or close and reopen the file). The visual field list does not auto-update.
 
-5. **`discourageImplicitMeasures: true` missing at root** — Without this flag, Power BI Desktop auto-creates implicit measures from numeric columns that conflict with the explicit measures in the Measure table.
+5. **`discourageImplicitMeasures: true` missing inside `model`** — Without this flag, Power BI Desktop auto-creates implicit measures from numeric columns that conflict with the explicit measures in the Measure table.
 
 **Correct deploy sequence:**
 ```
@@ -2460,14 +2460,14 @@ def write_bim(tables, relationships, measures):
         "name": "Measure",
         "description": (
             f"All DAX measures for {COMPANY_NAME} — {INDUSTRY_NAME} model. "
-            "The _Measures column is a hidden placeholder. "
+            "The _ column is a hidden placeholder. "
             "All visible content is inside the numbered display folders. "
             "Designed & Developed by Logeshkumar Sivakumar · elogu2001@outlook.com · "
             "© 2026 Logeshkumar Sivakumar. All rights reserved."
         ),
         "columns": [
             {
-                "name": "_Measures",
+                "name": "_",
                 "dataType": "string",
                 "isHidden": True,
                 "description": (
@@ -2486,7 +2486,7 @@ def write_bim(tables, relationships, measures):
                 "mode": "import",
                 "source": {
                     "type": "calculated",
-                    "expression": 'DATATABLE( "_Measures", STRING, {{""}} )'
+                    "expression": 'DATATABLE( "_", STRING, {{""}} )'
                 }
             }
         ],
@@ -2499,11 +2499,11 @@ def write_bim(tables, relationships, measures):
 
     model = {
         "name": f"{COMPANY_NAME.lower().replace(' ', '_')}_{INDUSTRY_NAME.lower().replace(' ', '_')}_model",
-        "compatibilityLevel": 1550,
-        "defaultPowerBIDataSourceVersion": "PowerBI_V3",
-        "discourageImplicitMeasures": True,
+        "compatibilityLevel": 1600,
         "model": {
             "description": ATTRIBUTION,
+            "defaultPowerBIDataSourceVersion": "PowerBI_V3",
+            "discourageImplicitMeasures": True,
             "tables": tables + [measure_table],
             "relationships": relationships,
             "expressions": [build_dataset_folder_expression()]
@@ -3559,7 +3559,7 @@ def _getting_started_section():
         "| Measures not showing after deploy | Forgot Ctrl+S before Deploy | Re-open BIM → Ctrl+S → Deploy |",
         "| Measures showing wrong format (decimal instead of %) | PBI_FormatHint annotation missing | Regenerate BIM |",
         "| Data source error on refresh | DatasetFolder path is wrong | Edit BIM path → redeploy |",
-        "| Measure table empty in Fields pane | Empty columns list — Power BI requires at least one column | Regenerate BIM — Measure table now uses DATATABLE partition with hidden _Measures column |",
+        "| Measure table empty in Fields pane | Empty columns list — Power BI requires at least one column | Regenerate BIM — Measure table now uses DATATABLE partition with hidden _ column |",
         "| Deploy option greyed out | Power BI Desktop not open | Open PBI Desktop with blank report → retry |",
         "| Column tooltips blank | description property missing in BIM column JSON | Regenerate BIM |",
         "| Table tooltip blank | description property missing in BIM table JSON | Regenerate BIM |",
