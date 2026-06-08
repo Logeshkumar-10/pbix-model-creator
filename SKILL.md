@@ -1688,6 +1688,24 @@ Without it, the field list tooltip in Power BI Desktop is blank and documentatio
 }
 ```
 
+**Column with `sortByColumn` (required for label columns sorted by numeric order):**
+
+```json
+{
+  "name": "Month Short Name",
+  "description": "Three-letter month abbreviation (Jan, Feb, Mar...). Used on compact chart axes.",
+  "dataType": "string",
+  "sourceColumn": "MonthShortName",
+  "isHidden": false,
+  "sortByColumn": "Month Number",
+  "annotations": [
+    { "name": "SummarizationSetBy", "value": "User" }
+  ]
+}
+```
+
+The `sortByColumn` value uses the **display name** of the target column (post-rename), not the raw source name. The target column must exist in the same table.
+
 **Correct table JSON (description is a sibling of name):**
 
 ```json
@@ -1819,6 +1837,110 @@ The examples below show what the JSON looks like for two different industries.
 
 The folder name, measure name, format, and description all change by industry.
 Never use `"06 | KPI & Ratios"` or `"07 | Revenue & Sales"` — those are generic labels that do not belong in any specific industry model.
+
+---
+
+### Hierarchy JSON Template (inside table object)
+
+Hierarchies are added to dimension tables only. The `"hierarchies"` key is a sibling
+of `"columns"` and `"partitions"` inside the table object.
+
+```json
+{
+  "name": "[Dim] Account",
+  "columns": [ ... ],
+  "partitions": [ ... ],
+  "hierarchies": [
+    {
+      "name": "[H] Account Hierarchy",
+      "description": "P&L drill-down from top-level category to individual posting account.",
+      "levels": [
+        { "name": "P&L Category",  "ordinal": 0, "column": "Level 1 Name" },
+        { "name": "Account Group", "ordinal": 1, "column": "Level 2 Name" },
+        { "name": "Account",       "ordinal": 2, "column": "Account Name" }
+      ]
+    }
+  ]
+}
+```
+
+**Hierarchy naming rule:** All hierarchies use the `[H]` prefix — distinguishes them
+from columns in the Power BI field list at a glance. The `[H]` prefix is always
+followed by a space and a descriptive name: `[H] Date`, `[H] Geography`,
+`[H] Organisation Chart`.
+
+**Tables with hierarchies:**
+
+| Table | Hierarchy Name | Levels (broadest → most granular) |
+|-------|---------------|----------------------------------|
+| `[Dim] Account` | `[H] Account Hierarchy` | P&L Category → Account Group → Account |
+| `[Dim] Product` | `[H] Product Hierarchy` | Category → Sub-Category → Product |
+| `[Dim] Geography` | `[H] Geography` | Region → Country → State → City |
+| `[Dim] Date` | `[H] Date` | Year → Quarter → Month → Date |
+| `[Dim] Date` | `[H] Fiscal Date` | Fiscal Year → Fiscal Quarter → Fiscal Month |
+| `[Dim] Business Unit` | `[H] Business Unit` | Company → Business Unit → Division |
+| `[Dim] Department` | `[H] Department` | Division → Department → Team |
+| `[Dim] Customer` | `[H] Customer` | Parent Company → Subsidiary → Customer |
+| `[Dim] Supplier` | `[H] Supplier` | Parent Group → Subsidiary → Supplier |
+| `[Dim] Asset` | `[H] Asset` | Asset Category → Sub-Category → Asset |
+| `[Dim] Employee` | `[H] Organisation Chart` | Executive → Senior Leader → Manager → Team Lead → Employee |
+
+**Level presence check:** A hierarchy is only written when all its level columns
+exist in the table. If a level is absent the hierarchy is reduced (one level missing)
+or skipped entirely (two or more levels missing). This prevents deployment errors.
+
+---
+
+### Sort-by-Column Rules
+
+Power BI sorts string columns alphabetically by default. For label columns this is
+wrong — months appear as Apr, Aug, Dec rather than Jan, Feb, Mar. The `sortByColumn`
+property in the BIM tells Power BI to display values in the order of a different
+column, almost always a numeric one.
+
+**Standard sort relationships applied automatically:**
+
+| Table | Column to Sort | Sort By Column |
+|-------|---------------|----------------|
+| `[Dim] Date` | `Month Short Name` | `Month Number` |
+| `[Dim] Date` | `Month Name` | `Month Number` |
+| `[Dim] Date` | `Quarter Label` | `Calendar Quarter` |
+| `[Dim] Date` | `Year Month Label` | `Year Month` |
+| `[Dim] Date` | `Day Name` | `Day Of Week` |
+| `[Dim] Account` | `Account Name` | `Sort Order` |
+| `[Dim] Account` | `Account Short Name` | `Sort Order` |
+| `[Dim] Account` | `Level 1 Name` → `Level 3 Name` | `Level N Key` |
+| `[Dim] Product` | `Product Name` | `Sort Order` |
+| `[Dim] Product` | `Level 1/2/3 Name` | `Level N Key` |
+| `[Dim] Geography` | `Geography Name` | `Sort Order` |
+| `[Dim] Geography` | `Level 1/2/3/4 Name` | `Level N Key` |
+| `[Dim] Business Unit` | `Business Unit Name` | `Sort Order` |
+| `[Dim] Department` | `Department Name` | `Sort Order` |
+| `[Dim] Customer` | `Customer Name` | `Sort Order` |
+| `[Dim] Supplier` | `Supplier Name` | `Sort Order` |
+| `[Dim] Asset` | `Asset Name` | `Sort Order` |
+| `[Dim] Scenario` | `Scenario Name` | `Sort Order` |
+| `[Dim] Employee` | `Job Grade` | `Job Grade Num` |
+
+**Why this matters for the P&L (Accounts):** Power BI displays leaf accounts in
+alphabetical order by default — meaning `Accounts Receivable` appears before
+`Revenue` in a Matrix visual. Sorting `Account Name` by `Sort Order` ensures the
+P&L renders in the correct income-statement order: Revenue → COGS → Gross Profit →
+OPEX → EBITDA → Net Profit.
+
+**Generic detection for any dataset:** The `detect_generic_sort_relationships()`
+function scans column names in any table not covered by `SORT_RULES` and applies
+sort relationships from patterns:
+- `X Label` → looks for `X Number`, `X Num`, or `X Key`
+- `X Short Name` → looks for `X Number`
+- `X Name` where X is time-related → looks for `X Number` or `X Key`
+
+This makes the skill work on any dataset — including custom industry tables — without
+the user having to add explicit rules.
+
+**Validation:** A sort rule is applied only when both the target column and the sort
+column exist in the table. Missing columns are silently skipped. Self-references
+(sorting a column by itself) are blocked.
 
 ---
 
@@ -2092,7 +2214,520 @@ BUILTIN_COL_DESCS = {
     ("DimAsset", "IsActive"):             "Yes if the asset is currently in service. No if disposed or retired.",
 }
 
-def resolve_table_description(raw_name, internal_descs, public_descs, builtin_descs):
+# ── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
+
+def rename_column(raw_col):
+    """Convert PascalCase / camelCase column name to display name with spaces."""
+    import re
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', raw_col)
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s)
+    return s.strip()
+
+
+def should_hide_column(raw_col):
+    """Return True for FK keys, hierarchy paths, and internal technical columns."""
+    ALWAYS_HIDE = {
+        "AccountKey","ParentAccountKey","BusinessUnitKey","ParentBusinessUnitKey",
+        "DepartmentKey","ParentDepartmentKey","GeographyKey","ParentGeographyKey",
+        "ScenarioKey","ProductKey","ParentProductKey","EmployeeKey","ManagerEmployeeKey",
+        "CustomerKey","ParentCustomerKey","SupplierKey","ParentSupplierKey",
+        "AssetKey","ParentAssetKey","EventKey","TrialKey","SalesRepKey","VendorKey",
+        "LocationKey","Level1Key","Level2Key","Level3Key","Level4Key","Level5Key",
+        "OrgLevel1Key","OrgLevel2Key","OrgLevel3Key","OrgLevel4Key","OrgLevel5Key",
+        "SignConvention","NormalBalance","LinkedProductKey","LinkedBusinessUnitKey",
+        "AccountHierarchyPath","BUHierarchyPath","DeptHierarchyPath","OrgHierarchyPath",
+        "CustomerHierarchyPath","SupplierHierarchyPath","ProductHierarchyPath",
+        "GeographyHierarchyPath","AssetHierarchyPath",
+    }
+    if raw_col in ALWAYS_HIDE:
+        return True
+    lc = raw_col.lower()
+    if lc.endswith("key"):
+        return True
+    if "hierarchypath" in lc or "hierarchydepth" in lc:
+        return True
+    if lc in ("budepth","deptdepth","orgdepth","customerdepth","supplierdepth",
+              "productdepth","geographydepth","assetdepth","accountdepth"):
+        return True
+    return False
+
+
+def infer_data_type(raw_col):
+    """
+    Infer the Tabular Model dataType from the column name.
+    Reads column name patterns — never guesses from pandas dtype (which defaults
+    to object/string when reading 0 data rows, causing every column to be typed
+    as string regardless of content).
+
+    Return values match Tabular Model type strings:
+        "int64"    — integers, keys, counts, year/month numbers
+        "double"   — decimals, amounts, rates, percentages, coordinates
+        "dateTime" — date and datetime columns
+        "boolean"  — yes/no flag columns
+        "string"   — all others
+    """
+    c = raw_col.lower().strip()
+
+    # ── Integer: all FK and PK keys ─────────────────────────────────────────
+    if c.endswith("key"):
+        return "int64"
+
+    # ── Integer: exact column names ──────────────────────────────────────────
+    INT_EXACT = {
+        "yearmonth","year","calendaryear","fiscalyear",
+        "quarternumber","fiscalquarter","calendarquarter",
+        "monthnumber","monthnum","weeknumber","dayofweek","dayofmonth","dayofyear",
+        "accountdepth","accountlevel","accountlevelnum",
+        "businessunitdepth","businessunitlevelnum",
+        "departmentdepth","departmentlevelnum",
+        "geographydepth","geographylevelnum",
+        "productdepth","productlevelnum",
+        "customerdepth","customerlevelnum",
+        "supplierdepth","supplierlevelnum",
+        "assetdepth","assetlevelnum",
+        "orgdepth","jobradenum","orgleveldepth",
+        "sortorder","usefullifemonths","paymenttermsdays",
+        "leadtimedays","recoverymonths","enrollmenttarget",
+        "sitecount","elapsed","remaining",
+    }
+    if c in INT_EXACT:
+        return "int64"
+
+    # ── DateTime: columns whose name ends with "date" or matches known date cols ─
+    DATE_EXACT = {
+        "date","fulldate","orderdate","invoicedate","duedate","deliverydate",
+        "claimdate","maintenancedate","acquisitiondate","disposaldate",
+        "joiningdate","confirmationdate","exitdate","contractstartdate",
+        "contractenddate","publisheddate","startdate","enddate",
+        "peakimpactdate","recoverydate","estimatedenddate","transactiondate",
+    }
+    if c in DATE_EXACT:
+        return "dateTime"
+    if c.endswith("date") and "update" not in c and "candidate" not in c:
+        return "dateTime"
+
+    # ── Boolean: yes/no flag columns ─────────────────────────────────────────
+    BOOL_EXACT = {
+        "isweekend","ismonthend","isleafnode","isleaf","iscalculated",
+        "isnewcustomer","ischurn","isrecurring","isactive","isongoing",
+        "bonuseligible","cashnononcash","profitcentre","policycomplement",
+    }
+    if c in BOOL_EXACT:
+        return "boolean"
+    if c.startswith("is") and len(c) > 4:
+        return "boolean"
+
+    # ── Double: any column whose name contains a numeric-value keyword ────────
+    NUMERIC_SUBSTRINGS = [
+        "amount","cost","price","revenue","salary","earnings","pay",
+        "profit","margin","income","expense","rate","pct","percent",
+        "ratio","multiplier","latitude","longitude","taxrate",
+        "discount","quantity","units","volume","weight","area","sqft",
+        "value","balance","budget","target","baseprice","standardcost",
+        "residualvalue","acquisitioncost","creditlimit","annualcontract",
+        "annualspend","annualbas","variablepay","benefitscost",
+        "shockmultiplier","taxable","taxamount","depreciation","netbook",
+        "enrollment","trialcost","totalcost","laborcost","partscost",
+        "downtimehours","grossearning","netsalary","grosspay","netpay",
+        "allowance","deduction","contribution","commission","bonus",
+        "freight","premium","claim","royalt","interest","dividend",
+        "arpu","mrr","arr","cac","ltv","adr","revpar","goppar","nim",
+        "oee","utilisation","utilization","occupancy","throughput",
+        "coverage","allocation","penetration","retention","churn",
+    ]
+    for sub in NUMERIC_SUBSTRINGS:
+        if sub in c:
+            return "double"
+
+    return "string"
+
+
+# ── HIERARCHY DEFINITIONS ─────────────────────────────────────────────────────
+# Hierarchies are added to dimension tables only.
+# Name convention: "[H] Hierarchy Name" — the [H] prefix makes them easy to
+# identify in the Power BI field list and distinguishes them from columns.
+# Each level references the DISPLAY column name (post-rename), not the raw name.
+# Levels are listed from broadest (ordinal 0) to most granular (last ordinal).
+
+HIERARCHY_DEFINITIONS = {
+
+    "[Dim] Account": [
+        {
+            "name": "[H] Account Hierarchy",
+            "description": "P&L drill-down from top-level category to individual posting account. Use in Matrix visuals for Income Statement and variance reports.",
+            "levels": [
+                {"name": "P&L Category",    "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Account Group",   "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Account",         "ordinal": 2, "column": "Account Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Product": [
+        {
+            "name": "[H] Product Hierarchy",
+            "description": "Product drill-down from Category to individual Product. Use in revenue mix and Pareto analysis visuals.",
+            "levels": [
+                {"name": "Category",        "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Sub-Category",    "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Product",         "ordinal": 2, "column": "Product Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Geography": [
+        {
+            "name": "[H] Geography",
+            "description": "Location drill-down from global Region to City. Use in map visuals and regional performance analysis.",
+            "levels": [
+                {"name": "Region",          "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Country",         "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "State",           "ordinal": 2, "column": "Level 3 Name"},
+                {"name": "City",            "ordinal": 3, "column": "Level 4 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Date": [
+        {
+            "name": "[H] Date",
+            "description": "Standard calendar drill-down from Year to individual Date. Use in all time-series visuals and period slicers.",
+            "levels": [
+                {"name": "Year",            "ordinal": 0, "column": "Calendar Year"},
+                {"name": "Quarter",         "ordinal": 1, "column": "Quarter Label"},
+                {"name": "Month",           "ordinal": 2, "column": "Month Short Name"},
+                {"name": "Date",            "ordinal": 3, "column": "Full Date"},
+            ]
+        },
+        {
+            "name": "[H] Fiscal Date",
+            "description": "Fiscal calendar drill-down from Fiscal Year to Month. Use when the company's financial year differs from the calendar year.",
+            "levels": [
+                {"name": "Fiscal Year",     "ordinal": 0, "column": "Fiscal Year"},
+                {"name": "Fiscal Quarter",  "ordinal": 1, "column": "Fiscal Quarter"},
+                {"name": "Fiscal Month",    "ordinal": 2, "column": "Month Short Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Business Unit": [
+        {
+            "name": "[H] Business Unit",
+            "description": "Organisational drill-down from Company to Division. Use in P&L slicing and cost centre analysis.",
+            "levels": [
+                {"name": "Company",         "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Business Unit",   "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Division",        "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Department": [
+        {
+            "name": "[H] Department",
+            "description": "Cost centre drill-down from Division to Team. Use in payroll and expense analysis.",
+            "levels": [
+                {"name": "Division",        "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Department",      "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Team",            "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Customer": [
+        {
+            "name": "[H] Customer",
+            "description": "Customer drill-down from Parent Company to billing entity. Use in revenue by customer and contract analysis.",
+            "levels": [
+                {"name": "Parent Company",  "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Subsidiary",      "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Customer",        "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Supplier": [
+        {
+            "name": "[H] Supplier",
+            "description": "Supplier drill-down from Parent Group to transacting unit. Use in procurement spend and supplier concentration analysis.",
+            "levels": [
+                {"name": "Parent Group",    "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Subsidiary",      "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Supplier",        "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Asset": [
+        {
+            "name": "[H] Asset",
+            "description": "Fixed asset drill-down from Asset Category to individual asset. Use in depreciation schedule and maintenance cost analysis.",
+            "levels": [
+                {"name": "Asset Category",  "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Sub-Category",    "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Asset",           "ordinal": 2, "column": "Asset Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Employee": [
+        {
+            "name": "[H] Organisation Chart",
+            "description": "Reporting line drill-down from C-suite to individual employee. Use in headcount, payroll, and span-of-control analysis.",
+            "levels": [
+                {"name": "Executive",       "ordinal": 0, "column": "Org Level 1 Name"},
+                {"name": "Senior Leader",   "ordinal": 1, "column": "Org Level 2 Name"},
+                {"name": "Manager",         "ordinal": 2, "column": "Org Level 3 Name"},
+                {"name": "Team Lead",       "ordinal": 3, "column": "Org Level 4 Name"},
+                {"name": "Employee",        "ordinal": 4, "column": "Full Name"},
+            ]
+        }
+    ],
+}
+
+
+def build_hierarchies(display_table_name, column_display_names):
+    """
+    Returns the hierarchy list for a given table, filtering out levels whose
+    column does not exist in the table's actual column set.
+    Only hierarchies where ALL levels are present are included.
+
+    Args:
+        display_table_name : e.g. "[Dim] Account"
+        column_display_names: set of display column names for this table
+
+    Returns:
+        list of hierarchy dicts (may be empty if no definitions exist)
+    """
+    if display_table_name not in HIERARCHY_DEFINITIONS:
+        return []
+
+    result = []
+    for hier in HIERARCHY_DEFINITIONS[display_table_name]:
+        # Check every level's column exists in the table
+        all_present = all(
+            lvl["column"] in column_display_names
+            for lvl in hier["levels"]
+        )
+        if not all_present:
+            # Try to find the column with a case-insensitive match
+            missing = [
+                lvl["column"] for lvl in hier["levels"]
+                if lvl["column"] not in column_display_names
+            ]
+            # Skip hierarchy if more than one level is missing
+            if len(missing) > 1:
+                continue
+            # If only one level is missing, it may be a name mismatch —
+            # skip that level (hierarchy still valid with fewer levels)
+            hier = dict(hier)
+            hier["levels"] = [
+                lvl for lvl in hier["levels"]
+                if lvl["column"] in column_display_names
+            ]
+        result.append({
+            "name":        hier["name"],
+            "description": hier["description"],
+            "levels": [
+                {
+                    "name":    lvl["name"],
+                    "ordinal": lvl["ordinal"],
+                    "column":  lvl["column"]
+                }
+                for lvl in hier["levels"]
+            ]
+        })
+    return result
+
+
+# ── SORT-BY-COLUMN RULES ──────────────────────────────────────────────────────
+# Power BI sorts string columns alphabetically by default. For label columns
+# (Month Short Name, Quarter Label, Account Name in P&L order, etc.), this is
+# wrong. The "sortByColumn" property tells Power BI to display values in the
+# order of a different column — almost always a numeric one.
+#
+# Rules use DISPLAY column names (post-rename). Key entries:
+#   - Month Short Name / Month Name → Month Number (so Jan, Feb, Mar... not Apr, Aug, Dec)
+#   - Quarter Label                 → Calendar Quarter
+#   - Year Month Label              → Year Month
+#   - Day Name                      → Day Of Week
+#   - Account Name                  → Sort Order (P&L order: Revenue first, then COGS...)
+#   - Level N Name                  → Level N Key (hierarchy ordering)
+#   - Scenario Name                 → Sort Order
+#
+# Sort rules are applied only when BOTH columns exist in the table.
+
+SORT_RULES = {
+
+    "[Dim] Date": [
+        # Format: (column_to_sort, sort_by_column)
+        ("Month Short Name",     "Month Number"),
+        ("Month Name",           "Month Number"),
+        ("Quarter Label",        "Calendar Quarter"),
+        ("Year Month Label",     "Year Month"),
+        ("Day Name",             "Day Of Week"),
+        ("Fiscal Month",         "Fiscal Month"),
+        ("Fiscal Quarter Label", "Fiscal Quarter"),
+    ],
+
+    "[Dim] Account": [
+        ("Account Name",         "Sort Order"),
+        ("Account Short Name",   "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Product": [
+        ("Product Name",         "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Geography": [
+        ("Geography Name",       "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+        ("Level 4 Name",         "Level 4 Key"),
+    ],
+
+    "[Dim] Business Unit": [
+        ("Business Unit Name",   "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Department": [
+        ("Department Name",      "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Customer": [
+        ("Customer Name",        "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Supplier": [
+        ("Supplier Name",        "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Asset": [
+        ("Asset Name",           "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+    ],
+
+    "[Dim] Scenario": [
+        ("Scenario Name",        "Sort Order"),
+    ],
+
+    "[Dim] Employee": [
+        ("Job Grade",            "Job Grade Num"),
+        ("Org Level 1 Name",     "Org Level 1 Key"),
+        ("Org Level 2 Name",     "Org Level 2 Key"),
+        ("Org Level 3 Name",     "Org Level 3 Key"),
+        ("Org Level 4 Name",     "Org Level 4 Key"),
+    ],
+
+    "[Dim] Macro Event": [
+        ("Event Name",           "Start Date"),
+        ("Intensity",            "Shock Multiplier"),
+    ],
+}
+
+
+def detect_generic_sort_relationships(column_names_set):
+    """
+    Pattern-based detection of sort relationships for ANY dataset.
+    Used as a fallback when the table is not in SORT_RULES.
+
+    Detection patterns:
+        - "X Label"      → "X Number" / "X Key" / "X"
+        - "X Name"       → "X Number" / "X Key" (only if "X" is time-related)
+        - "X Short Name" → "X Number"
+        - Any string column that has a corresponding "Sort Order" column → Sort Order
+
+    Returns a list of (target_col, sort_col) tuples valid against the given column set.
+    """
+    pairs   = []
+    cols_lc = {c.lower(): c for c in column_names_set}
+
+    # Time-related prefixes that warrant a Name → Number / Key sort
+    TIME_TOKENS = ("month", "quarter", "day", "week", "year", "fiscal")
+
+    for col in column_names_set:
+        col_lower = col.lower()
+
+        # X Label → X Number / X Key / X
+        if col_lower.endswith(" label"):
+            base = col_lower[:-len(" label")]
+            for cand in (f"{base} number", f"{base} num", f"{base} key", base):
+                if cand in cols_lc and cols_lc[cand] != col:
+                    pairs.append((col, cols_lc[cand]))
+                    break
+
+        # X Short Name → X Number  (e.g. Month Short Name → Month Number)
+        elif col_lower.endswith(" short name"):
+            base = col_lower[:-len(" short name")]
+            for cand in (f"{base} number", f"{base} num"):
+                if cand in cols_lc:
+                    pairs.append((col, cols_lc[cand]))
+                    break
+
+        # X Name → X Number / X Key  (only for time-related prefixes)
+        elif col_lower.endswith(" name"):
+            base = col_lower[:-len(" name")]
+            if any(base.startswith(t) for t in TIME_TOKENS):
+                for cand in (f"{base} number", f"{base} num", f"{base} key"):
+                    if cand in cols_lc:
+                        pairs.append((col, cols_lc[cand]))
+                        break
+
+    return pairs
+
+
+def apply_sort_by_columns(display_table_name, columns):
+    """
+    Sets the sortByColumn property on every column that has a defined sort rule.
+    Modifies the columns list in place.
+
+    Resolution order:
+        1. SORT_RULES dict — explicit, table-specific rules
+        2. detect_generic_sort_relationships — pattern-based fallback
+
+    A sort rule is applied only when both columns exist in the table.
+    Self-references (sorting a column by itself) are silently skipped.
+    """
+    col_names = {c["name"] for c in columns}
+    col_index = {c["name"]: c for c in columns}
+
+    # Build the combined rule list — explicit first, generic for any leftover
+    rules = list(SORT_RULES.get(display_table_name, []))
+    explicit_targets = {target for target, _ in rules}
+    for tgt, src in detect_generic_sort_relationships(col_names):
+        if tgt not in explicit_targets:
+            rules.append((tgt, src))
+
+    applied = 0
+    for target_col, sort_col in rules:
+        if target_col == sort_col:
+            continue                                      # self-reference
+        if target_col in col_index and sort_col in col_names:
+            col_index[target_col]["sortByColumn"] = sort_col
+            applied += 1
+    return applied
+
+
     """Returns the best available description for a table."""
     # Priority 1 — internal doc
     if raw_name in internal_descs:
@@ -2118,11 +2753,11 @@ def build_table(raw_name, display_name, columns_raw):
         display_col = rename_column(raw_col)
         desc        = resolve_description(raw_col, raw_name,
                                           internal_descs, public_descs, BUILTIN_COL_DESCS)
-        col_type    = infer_data_type(raw_col)
+        col_type    = infer_data_type(raw_col)     # uses pattern-matching, not pandas dtype
         is_hidden   = should_hide_column(raw_col)
         columns.append({
             "name":         display_col,
-            "description":  desc,              # ← required for field list tooltip
+            "description":  desc,
             "dataType":     col_type,
             "sourceColumn": raw_col,
             "isHidden":     is_hidden,
@@ -2130,11 +2765,21 @@ def build_table(raw_name, display_name, columns_raw):
                 {"name": "SummarizationSetBy", "value": "User"}
             ]
         })
+
+    # Build hierarchy list — only dim tables have definitions
+    col_display_set = {c["name"] for c in columns}
+    hierarchies     = build_hierarchies(display_name, col_display_set)
+
+    # Apply sortByColumn rules — adds "sortByColumn" to columns where applicable
+    # Validates against actual columns present; pattern-detects additional rules
+    # for tables not in SORT_RULES so the skill works for any dataset.
+    apply_sort_by_columns(display_name, columns)
+
     table_desc = resolve_table_description(raw_name, internal_descs,
                                            public_descs, BUILTIN_TABLE_DESCS)
-    return {
+    table_obj = {
         "name":        display_name,
-        "description": table_desc,             # ← required for table tooltip
+        "description": table_desc,
         "columns":     columns,
         "partitions": [{
             "name":     display_name,
@@ -2155,6 +2800,10 @@ def build_table(raw_name, display_name, columns_raw):
             {"name": "PBI_ResultType", "value": "Table"}
         ]
     }
+    # Only add "hierarchies" key when at least one hierarchy was resolved
+    if hierarchies:
+        table_obj["hierarchies"] = hierarchies
+    return table_obj
 
 
 def build_dataset_folder_expression():
@@ -2598,16 +3247,19 @@ The currency format must match the currency selected during intake of the enterp
 |------|-------------|
 | Table renaming | Every raw CSV name must map to a display name before BIM is written |
 | Column visibility | All FK, PK, and technical columns must be hidden |
+| Data type inference | Use `infer_data_type()` pattern matching — never pandas dtype inference on 0-row reads. Keys → `int64`, dates → `dateTime`, amounts/rates → `double`, is* flags → `boolean`, all others → `string` |
 | Relationship creation | Only create if both sides are present in CSV folder |
-| Measure folders | Use 00–13 numeric prefix; only generate selected folders |
+| Hierarchies | Add `[H]`-prefixed hierarchies to all applicable dimension tables. Only write a hierarchy when all its level columns exist in the table |
+| Sort by column | Apply `sortByColumn` to all label columns. Months, quarters, day names, accounts, and product/geography level names must never sort alphabetically. Uses `SORT_RULES` dict for known tables and `detect_generic_sort_relationships()` for any other table |
+| Measure folders | Use numeric prefix; only generate selected folders |
 | No reconciliation | Never generate any measure that compares table totals to each other |
 | No debug measures | No COUNTROWS checks, no test flags, no _Check measures |
-| Format strings | Every single measure must have a formatString set — never blank |
+| Format strings | Every measure must have a formatString — never blank |
 | DIVIDE() | Always use DIVIDE() for division — no direct `/` operator |
 | Scenario filters | Always use KEEPFILTERS when filtering on Scenario Name |
 | Variables | Any measure with 2+ computation steps must use VAR / RETURN |
 | Attribution | Both model.bim description field and build_model.py top comment must contain attribution |
-| Industry KPIs | Always generate the correct industry block in folder 12, matching industry from intake |
+| Industry KPIs | Always generate industry-native measure folders from actual account codes and operational columns |
 
 ---
 
@@ -3159,7 +3811,7 @@ If you want to add or edit a specific measure without rebuilding the full BIM:
 | "Deployment failed — server not found" | Power BI Desktop was not open when Deploy was clicked | Close Tabular Editor, open Power BI Desktop first, then re-open BIM and deploy |
 | Tables show no rows after deploy | Data refresh not run after deployment | Home → Refresh in Power BI Desktop |
 | Credential prompt on refresh | Power BI asking for CSV authentication | Select Anonymous in the credential dialog |
-| Month labels sort alphabetically (Apr before Jan) | Month Label not sorted by Month Number | In Model view, select Month Label column → Column Tools → Sort by Column → Month Number |
+| Month labels sort alphabetically (Apr before Jan) | BIM was built before sort rules were added | Re-run build_model.py — `sortByColumn` is now applied automatically for Date, Account, Product, Geography and all other dimension tables |
 | Measures show blank in visuals | Filter context excludes all rows | Add [Dim] Date and [Dim] Scenario slicers to the page and select values |
 | Display folders not visible in Fields pane | Power BI Desktop is in compact field list mode | Click the ⋯ menu at the top of Fields pane → Show display folders |
 | DatasetFolder path error on refresh | Backslash format wrong in the BIM | In Tabular Editor, check DatasetFolder uses single backslashes: `C:\Users\...` |
@@ -3167,18 +3819,21 @@ If you want to add or edit a specific measure without rebuilding the full BIM:
 
 ---
 
-### Part E — Sorting and Formatting After Deployment
+### Part E — Formatting After Deployment
+
+Sorting (months, quarters, accounts in P&L order, product hierarchies) is **now applied
+automatically by the skill** via `sortByColumn` properties in the BIM. No manual sorting
+is required after deployment.
 
 These steps are done once in Power BI Desktop after the first successful deployment:
 
-**Sort months correctly:**
-1. Model view → click **[Dim] Date** table
-2. Select **Month Short Name** column
-3. Column Tools ribbon → **Sort by Column** → select **Month Number**
+**Verify sort is correct (optional check):**
+1. Add a line chart to a page
+2. Drag `[Dim] Date` → `Month Short Name` to the X-axis
+3. Months should appear as Jan, Feb, Mar, Apr... not Apr, Aug, Dec...
 
-**Sort quarters correctly:**
-1. Select **Quarter Label** column
-2. Sort by Column → **Calendar Quarter**
+**If months still sort alphabetically:** the BIM was generated before sort rules were
+added. Re-run `build_model.py` and redeploy.
 
 **Set table descriptions visible as tooltips:**
 1. Hover over any column in the Fields pane
