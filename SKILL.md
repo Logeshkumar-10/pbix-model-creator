@@ -83,7 +83,93 @@ Every Python script, BIM file, and documentation file produced by this skill mus
 
 ---
 
-## What This Skill Produces
+## CRITICAL BIM Generation Rules — Read Before Generating Any Output
+
+These rules are the most common failure points. Every BIM the skill produces — whether by running `build_model.py` or by Claude generating JSON directly — MUST satisfy all six rules below. Skipping any rule causes deployment to fail or produces a broken model.
+
+### Rule 1 — Data Types Must Be Inferred from Column Name Patterns
+
+NEVER read CSV files with `nrows=0` and rely on pandas dtype inference — pandas defaults every column to `object` (string) when there are no data rows to sample. The result is a BIM where every column is typed as `string`, including amount columns, key columns, and date columns.
+
+ALWAYS use the `infer_data_type()` function which pattern-matches the column name:
+
+| Pattern | Type |
+|---------|------|
+| Ends in `Key` (any case) | `int64` |
+| Contains `Date` and not `Update` | `dateTime` |
+| Starts with `Is` (any case) | `boolean` |
+| Contains `Amount`, `Cost`, `Price`, `Revenue`, `Rate`, `Pct`, `Margin`, `Discount`, `Quantity` | `double` |
+| Everything else | `string` |
+
+When generating a BIM JSON directly without running the Python script, apply these patterns column-by-column. Do not assume `string` as a safe default — it is the most common bug.
+
+### Rule 2 — Hierarchies Must Be Created on All Applicable Dimension Tables
+
+EVERY dimension table that has level columns (`Level 1 Name`, `Level 2 Name`, etc.) or a clear drill-path (Year → Quarter → Month for Date, Region → Country for Geography) MUST have a `"hierarchies"` array in the BIM JSON.
+
+All hierarchy names use the `[H] ` prefix. The hierarchy `levels` array uses display column names (post-rename), and ordinals start at 0 for the broadest level.
+
+Tables requiring hierarchies: `[Dim] Date`, `[Dim] Account`, `[Dim] Product`, `[Dim] Geography`, `[Dim] Business Unit`, `[Dim] Department`, `[Dim] Customer`, `[Dim] Supplier`, `[Dim] Asset`, `[Dim] Employee`.
+
+When generating a BIM JSON directly, look at the column names of every dimension table — if it has level columns, build a hierarchy. Do not skip this step.
+
+### Rule 3 — Relationship Columns Use sourceColumn, Not Display Name
+
+In the BIM `relationships` array, the `fromColumn` and `toColumn` values MUST match the `sourceColumn` property of the column (the original CSV header), NOT the renamed display name.
+
+```json
+// CORRECT
+{ "fromTable": "[Fact] Financial", "fromColumn": "AccountKey",  "toTable": "[Dim] Account", "toColumn": "AccountKey" }
+
+// WRONG — Power BI silently fails to wire the relationship
+{ "fromTable": "[Fact] Financial", "fromColumn": "Account Key", "toTable": "[Dim] Account", "toColumn": "Account Key" }
+```
+
+When a column is defined as `{ "name": "Account Key", "sourceColumn": "AccountKey", ... }`, all relationships referencing it must use `"AccountKey"` not `"Account Key"`.
+
+This is the single most common reason models deploy without errors but show no relationships in Model view.
+
+### Rule 4 — Measure Table Placeholder Column Requires Three Specific Properties
+
+The hidden `_` column in the Measure table is a calculated table column. It MUST have all three of these properties — without them, Tabular Editor refuses to deploy with the error: `Column '_' in calculated table 'Measure' is missing the SourceColumn property`.
+
+```json
+{
+  "type":           "calculatedTableColumn",
+  "name":           "_",
+  "dataType":       "string",
+  "sourceColumn":   "[_]",
+  "isNameInferred": true,
+  "isHidden":       true
+}
+```
+
+All three properties — `type`, `sourceColumn` (with square brackets), and `isNameInferred` — are required. Missing any one of them blocks deployment.
+
+### Rule 5 — Measure Names Must Be Unique Across All Folders
+
+Tabular Editor refuses to deploy a model when two measures share the same name, even if they sit in different display folders. The error is: `Item 'XXX' already exists in the collection`.
+
+Before writing the BIM, run a duplicate name check across the full measures list:
+
+```python
+from collections import Counter
+dupes = {n: c for n, c in Counter(m["name"] for m in measures).items() if c > 1}
+if dupes:
+    raise ValueError(f"Duplicate measure names: {dupes}")
+```
+
+Common cause: a measure like `Latest Data Month` is contextually relevant in both a `Forecast & Full Year Estimate` folder and a `Navigation & Labels` folder. Place it in exactly one folder — the more contextually relevant one — and reference it from elsewhere.
+
+### Rule 6 — sortByColumn Must Be Applied to All Label Columns
+
+Power BI sorts string columns alphabetically by default. For label columns (Month Short Name, Quarter Label, Account Name in P&L order, hierarchy level names), this is wrong. The `sortByColumn` property must be set on every label column that has a corresponding numeric or ordinal column in the same table.
+
+The `apply_sort_by_columns()` function handles this automatically when `build_model.py` runs. When generating BIM JSON directly, apply the SORT_RULES table from the Sort-by-Column Rules section to every dimension table.
+
+---
+
+
 
 | Output File | Audience | Purpose |
 |------------|---------|---------|
@@ -794,74 +880,74 @@ All relationships are Many-to-One (fact → dimension), active unless noted.
 ```python
 UNIVERSAL_RELATIONSHIPS = [
     # [Fact] Financial
-    {"from_table": "[Fact] Financial", "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "Account Key",      "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "Scenario Key",     "to_table": "[Dim] Scenario",      "to_col": "Scenario Key",      "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "Department Key",   "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "AccountKey",      "to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "GeographyKey",    "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "ScenarioKey",     "to_table": "[Dim] Scenario",      "to_col": "ScenarioKey",      "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "DepartmentKey",   "to_table": "[Dim] Department",    "to_col": "DepartmentKey",    "active": True},
 
     # [Fact] Plan
-    {"from_table": "[Fact] Plan",      "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "Account Key",      "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "Scenario Key",     "to_table": "[Dim] Scenario",      "to_col": "Scenario Key",      "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "AccountKey",      "to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "GeographyKey",    "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "ScenarioKey",     "to_table": "[Dim] Scenario",      "to_col": "ScenarioKey",      "active": True},
 
     # [Fact] Invoice Line
-    {"from_table": "[Fact] Invoice Line","from_col": "Date Key",       "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "Product Key",    "to_table": "[Dim] Product",       "to_col": "Product Key",       "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "Customer Key",   "to_table": "[Dim] Customer",      "to_col": "Customer Key",      "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "Geography Key",  "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "Business Unit Key","to_table":"[Dim] Business Unit","to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "DateKey",       "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "ProductKey",    "to_table": "[Dim] Product",       "to_col": "ProductKey",       "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "CustomerKey",   "to_table": "[Dim] Customer",      "to_col": "CustomerKey",      "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "GeographyKey",  "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "BusinessUnitKey","to_table":"[Dim] Business Unit","to_col": "BusinessUnitKey", "active": True},
 
     # [Fact] Operational (industry-specific — generate only if table exists)
-    {"from_table": "[Fact] Operational","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Operational","from_col": "Product Key",     "to_table": "[Dim] Product",       "to_col": "Product Key",       "active": True},
-    {"from_table": "[Fact] Operational","from_col": "Geography Key",   "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
-    {"from_table": "[Fact] Operational","from_col": "Business Unit Key","to_table":"[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Operational","from_col": "DateKey",        "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Operational","from_col": "ProductKey",     "to_table": "[Dim] Product",       "to_col": "ProductKey",       "active": True},
+    {"from_table": "[Fact] Operational","from_col": "GeographyKey",   "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
+    {"from_table": "[Fact] Operational","from_col": "BusinessUnitKey","to_table":"[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
 
     # [Fact] Payroll
-    {"from_table": "[Fact] Payroll",   "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Payroll",   "from_col": "Employee Key",     "to_table": "[Dim] Employee",      "to_col": "Employee Key",      "active": True},
-    {"from_table": "[Fact] Payroll",   "from_col": "Department Key",   "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
-    {"from_table": "[Fact] Payroll",   "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "EmployeeKey",     "to_table": "[Dim] Employee",      "to_col": "EmployeeKey",      "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "DepartmentKey",   "to_table": "[Dim] Department",    "to_col": "DepartmentKey",    "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
 
     # [Fact] Expense Claim
-    {"from_table": "[Fact] Expense Claim","from_col":"Date Key",        "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Expense Claim","from_col":"Employee Key",    "to_table": "[Dim] Employee",      "to_col": "Employee Key",      "active": True},
-    {"from_table": "[Fact] Expense Claim","from_col":"Department Key",  "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "DateKey",        "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "EmployeeKey",    "to_table": "[Dim] Employee",      "to_col": "EmployeeKey",      "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "DepartmentKey",  "to_table": "[Dim] Department",    "to_col": "DepartmentKey",    "active": True},
 
     # [Fact] Depreciation
-    {"from_table": "[Fact] Depreciation","from_col":"Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Depreciation","from_col":"Asset Key",        "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
+    {"from_table": "[Fact] Depreciation","from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Depreciation","from_col": "AssetKey",        "to_table": "[Dim] Asset",         "to_col": "AssetKey",         "active": True},
 
     # [Fact] Asset Maintenance
-    {"from_table": "[Fact] Asset Maintenance","from_col":"Date Key",    "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Asset Maintenance","from_col":"Asset Key",   "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
+    {"from_table": "[Fact] Asset Maintenance","from_col": "DateKey",    "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Asset Maintenance","from_col": "AssetKey",   "to_table": "[Dim] Asset",         "to_col": "AssetKey",         "active": True},
 
     # [Fact] Tax
-    {"from_table": "[Fact] Tax",       "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Tax",       "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Tax",       "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Tax",       "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
 
     # [Fact] Utility
-    {"from_table": "[Fact] Utility",   "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Utility",   "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Utility",   "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Utility",   "from_col": "GeographyKey",    "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
 
     # [Fact] Journal Entry
-    {"from_table": "[Fact] Journal Entry","from_col":"Date Key",        "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Journal Entry","from_col":"Account Key",     "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
-    {"from_table": "[Fact] Journal Entry","from_col":"Business Unit Key","to_table":"[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "DateKey",        "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "AccountKey",     "to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "BusinessUnitKey","to_table":"[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
 
     # [Fact] CapEx (capital-intensive industries only)
-    {"from_table": "[Fact] CapEx",     "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] CapEx",     "from_col": "Asset Key",        "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
-    {"from_table": "[Fact] CapEx",     "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "AssetKey",        "to_table": "[Dim] Asset",         "to_col": "AssetKey",         "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
 
     # [Fact] Macro Event Impact
-    {"from_table": "[Fact] Macro Event Impact","from_col":"Date Key",   "to_table": "[Dim] Date",          "to_col": "Date Key",          "active": True},
-    {"from_table": "[Fact] Macro Event Impact","from_col":"Macro Event Key","to_table":"[Dim] Macro Event","to_col":"Macro Event Key",   "active": True},
-    {"from_table": "[Fact] Macro Event Impact","from_col":"Account Key","to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "DateKey",   "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "EventKey","to_table":"[Dim] Macro Event","to_col": "EventKey",   "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "AccountKey","to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
 ]
 ```
 
@@ -1724,19 +1810,21 @@ The `sortByColumn` value uses the **display name** of the target column (post-re
 
 Power BI Desktop requires the Measure table to have at least one column and a valid partition source. An empty `"columns": []` causes the table to be silently ignored and no measures appear in the Fields pane.
 
+**Critical:** The placeholder column must carry three specific properties — `type: "calculatedTableColumn"`, `sourceColumn: "[_]"` (square brackets required), and `isNameInferred: true`. Without these, Tabular Editor refuses to deploy with the error: `Column '_' in calculated table 'Measure' is missing the SourceColumn property`.
+
 ```json
 {
   "name": "Measure",
   "description": "All DAX measures for this model. The _ column is a hidden placeholder — only the measures inside the display folders are visible to report users.",
   "columns": [
     {
-      "name": "_",
-      "dataType": "string",
-      "isHidden": true,
-      "columnOrigin": {
-        "expression": "Placeholder"
-      },
-      "description": "Hidden placeholder column required for Power BI Desktop to register the Measure table. Not used in any report visual.",
+      "type":            "calculatedTableColumn",
+      "name":            "_",
+      "dataType":        "string",
+      "sourceColumn":    "[_]",
+      "isNameInferred":  true,
+      "isHidden":        true,
+      "description":     "Hidden placeholder column required for Power BI Desktop to register the Measure table. Not used in any report visual.",
       "annotations": [
         { "name": "SummarizationSetBy", "value": "User" }
       ]
@@ -1755,14 +1843,19 @@ Power BI Desktop requires the Measure table to have at least one column and a va
   ],
   "isHidden": false,
   "annotations": [
-    { "name": "PBI_ResultType",       "value": "Table"  },
+    { "name": "PBI_ResultType",         "value": "Table"      },
     { "name": "PBI_NavigationStepName", "value": "Navigation" }
   ]
 }
 ```
 
-**Why `DATATABLE` and not an empty M partition:**
-An M partition with `columns: []` creates a table with no columns — Power BI Desktop loads the table but discards all measures attached to it. A `DATATABLE` calculated partition creates one hidden row and one hidden column, which satisfies the engine's requirement for a non-empty table schema while keeping the Fields pane clean.
+**Why all three properties matter:**
+
+| Property | Why It's Required |
+|----------|------------------|
+| `type: "calculatedTableColumn"` | Tells Tabular Editor the column comes from a calculated table partition, not an imported one |
+| `sourceColumn: "[_]"` | The DAX-internal reference name — must match the column name in the DATATABLE expression, wrapped in square brackets |
+| `isNameInferred: true` | Tells the engine the column name was inferred from the DATATABLE expression, not explicitly set during partition creation |
 
 **Correct measure JSON — description and annotations both required:**
 
@@ -2826,6 +2919,18 @@ def build_dataset_folder_expression():
 
 # ── STEP 3: BUILD RELATIONSHIPS ──────────────────────────────────────────────
 def build_relationships(present_tables):
+    """
+    Builds the relationships array for the BIM.
+
+    CRITICAL: fromColumn and toColumn values come from from_col/to_col in
+    UNIVERSAL_RELATIONSHIPS — these are the camelCase source column names
+    (e.g. "AccountKey", "DateKey") that match the sourceColumn property of
+    each column definition in the BIM. Power BI resolves relationships by
+    sourceColumn, NOT by display name.
+
+    A relationship like { fromColumn: "Account Key" } silently fails to wire —
+    the model loads but the Model view shows no line between the tables.
+    """
     rels = []
     for r in UNIVERSAL_RELATIONSHIPS:
         from_raw = reverse_display_name(r["from_table"])
@@ -2835,11 +2940,11 @@ def build_relationships(present_tables):
         to_ok   = to_raw   in present_tables or r["to_table"]   in present_tables
         if from_ok and to_ok:
             rels.append({
-                "name":                   f"rel_{from_raw}_{r['from_col'].replace(' ', '')}",
+                "name":                   f"rel_{from_raw}_{r['from_col']}",
                 "fromTable":              r["from_table"],
-                "fromColumn":             r["from_col"],
+                "fromColumn":             r["from_col"],   # camelCase source name
                 "toTable":                r["to_table"],
-                "toColumn":               r["to_col"],
+                "toColumn":               r["to_col"],     # camelCase source name
                 "crossFilteringBehavior": "oneDirection",
                 "isActive":               r["active"]
             })
@@ -3072,28 +3177,48 @@ def generate_folder_measures(folder_name, measure_patterns, industry,
 # ── STEP 5: ASSEMBLE AND WRITE BIM ───────────────────────────────────────────
 def add_measure_annotations(measures):
     """
-    Adds PBI_FormatHint annotation to every measure.
-    Without this, Power BI Desktop ignores formatString and auto-formats.
-    Also ensures description is never None or empty.
+    Validates and annotates the measures list before it is written to the BIM:
+      1. Detects duplicate measure names — raises an error if any are found
+      2. Adds PBI_FormatHint annotation to every measure so Power BI respects formatString
+      3. Ensures every measure has a non-blank description
+
+    Why the duplicate check is critical:
+        Tabular Editor refuses to deploy a model if two measures share the same name.
+        The error is:
+            "Item 'XXX' already exists in the collection"
+        This happens when a measure is accidentally placed in two display folders,
+        or when a measure copied between folders during refactoring is not renamed.
+        Catching duplicates here, BEFORE the BIM is written, gives a clear error
+        message rather than a cryptic Tabular Editor deployment failure.
     """
+    from collections import Counter
+
+    # ── 1. Duplicate name check ─────────────────────────────────────────────
+    name_counts = Counter(m["name"] for m in measures)
+    duplicates  = {n: c for n, c in name_counts.items() if c > 1}
+    if duplicates:
+        msg_lines = ["Duplicate measure names detected — BIM will not be written:"]
+        for name, count in duplicates.items():
+            folders = sorted({
+                m.get("displayFolder", "(no folder)")
+                for m in measures if m["name"] == name
+            })
+            msg_lines.append(f"  • '{name}' appears {count} times in folders: {folders}")
+        msg_lines.append(
+            "Resolve before continuing: rename one copy, or remove the duplicate. "
+            "Each measure name must be unique across all folders in the Measure table."
+        )
+        raise ValueError("\n".join(msg_lines))
+
+    # ── 2. Add PBI_FormatHint and ensure description ────────────────────────
     for m in measures:
         if "annotations" not in m:
             m["annotations"] = []
-        # Add format hint if not already present
         has_hint = any(a["name"] == "PBI_FormatHint" for a in m["annotations"])
         if not has_hint:
-            # Determine hint value from formatString
             fmt = m.get("formatString", "")
-            if "%" in fmt:
-                hint = '{"isGeneralNumber":false}'
-            elif any(c in fmt for c in ["$","£","€","₹","#,##0"]):
-                hint = '{"isGeneralNumber":false}'
-            elif fmt == "@":
-                hint = '{"isGeneralNumber":false}'
-            else:
-                hint = '{"isGeneralNumber":false}'
+            hint = '{"isGeneralNumber":false}'   # safe default for all format types
             m["annotations"].append({"name": "PBI_FormatHint", "value": hint})
-        # Ensure description is never blank
         if not m.get("description"):
             m["description"] = f"Calculates {m['name']}."
     return measures
@@ -3103,8 +3228,12 @@ def write_bim(tables, relationships, measures):
     measures = add_measure_annotations(measures)
 
     # Measure table must have a DATATABLE calculated partition with at least one
-    # hidden column. Empty columns list causes Power BI Desktop to silently discard
-    # all measures. DATATABLE creates one hidden row — invisible to report users.
+    # hidden column. The column itself MUST carry three properties or Tabular
+    # Editor will refuse to deploy:
+    #   - type: "calculatedTableColumn"
+    #   - sourceColumn: "[_]" (square brackets required, matches DATATABLE expr)
+    #   - isNameInferred: True
+    # Empty columns list causes Power BI Desktop to silently discard all measures.
     measure_table = {
         "name": "Measure",
         "description": (
@@ -3116,9 +3245,12 @@ def write_bim(tables, relationships, measures):
         ),
         "columns": [
             {
-                "name": "_",
-                "dataType": "string",
-                "isHidden": True,
+                "type":           "calculatedTableColumn",
+                "name":           "_",
+                "dataType":       "string",
+                "sourceColumn":   "[_]",
+                "isNameInferred": True,
+                "isHidden":       True,
                 "description": (
                     "Hidden placeholder column required for Power BI Desktop to "
                     "register the Measure table. Not used in any report visual."
@@ -3251,6 +3383,9 @@ The currency format must match the currency selected during intake of the enterp
 | Relationship creation | Only create if both sides are present in CSV folder |
 | Hierarchies | Add `[H]`-prefixed hierarchies to all applicable dimension tables. Only write a hierarchy when all its level columns exist in the table |
 | Sort by column | Apply `sortByColumn` to all label columns. Months, quarters, day names, accounts, and product/geography level names must never sort alphabetically. Uses `SORT_RULES` dict for known tables and `detect_generic_sort_relationships()` for any other table |
+| Relationship column names | `fromColumn` and `toColumn` in relationships MUST use the `sourceColumn` value (camelCase, matches CSV header) — never the display name. `"AccountKey"` not `"Account Key"`. Wrong names cause silent relationship failure |
+| Measure table column | The `_` placeholder column MUST have `type: "calculatedTableColumn"`, `sourceColumn: "[_]"` (with square brackets), and `isNameInferred: true` — all three. Missing any one blocks deployment |
+| No duplicate measure names | Run `Counter` check on measure names before writing BIM. Tabular Editor refuses to deploy when two measures share a name across any folders |
 | Measure folders | Use numeric prefix; only generate selected folders |
 | No reconciliation | Never generate any measure that compares table totals to each other |
 | No debug measures | No COUNTROWS checks, no test flags, no _Check measures |
@@ -3815,7 +3950,11 @@ If you want to add or edit a specific measure without rebuilding the full BIM:
 | Measures show blank in visuals | Filter context excludes all rows | Add [Dim] Date and [Dim] Scenario slicers to the page and select values |
 | Display folders not visible in Fields pane | Power BI Desktop is in compact field list mode | Click the ⋯ menu at the top of Fields pane → Show display folders |
 | DatasetFolder path error on refresh | Backslash format wrong in the BIM | In Tabular Editor, check DatasetFolder uses single backslashes: `C:\Users\...` |
-| Model deploys but relationships missing | Both related tables must exist in the BIM | Re-run build_model.py with all CSVs present in the folder |
+| Model deploys but relationships missing | `fromColumn`/`toColumn` used display name instead of source column | Re-run build_model.py — all relationship references now use camelCase source names like "AccountKey" |
+| "Column '_' missing SourceColumn property" deploy error | Measure table placeholder column missing required properties | Re-run build_model.py — the `_` column now carries `type`, `sourceColumn: "[_]"`, and `isNameInferred: true` |
+| "Item 'XXX' already exists in the collection" deploy error | Duplicate measure name across folders | Re-run build_model.py — `add_measure_annotations()` now raises a clear ValueError listing the duplicate and its folders before the BIM is written |
+| Every column shows as "Text" type in Power BI | Pandas dtype inference returned `object` for every column | Re-run build_model.py — `infer_data_type()` now uses column name pattern matching, not pandas dtype |
+| Drill-down columns (Level 1, Level 2, Level 3) shown as flat list | Hierarchy not created on the dimension table | Re-run build_model.py — `build_hierarchies()` now adds `[H] Account Hierarchy`, `[H] Geography`, etc. to every applicable dimension table |
 
 ---
 
