@@ -167,6 +167,32 @@ Power BI sorts string columns alphabetically by default. For label columns (Mont
 
 The `apply_sort_by_columns()` function handles this automatically when `build_model.py` runs. When generating BIM JSON directly, apply the SORT_RULES table from the Sort-by-Column Rules section to every dimension table.
 
+### Rule 7 — Date Table Must Use the Enriched M Expression
+
+The `[Dim] Date` table MUST NOT use the simple CSV load partition that every other table uses. It must use the enriched M expression that:
+- Reads only the `Date` column from `DimDate.csv`
+- Removes all other CSV columns (they are regenerated from the Date value)
+- Generates 33 columns from the single Date column (including offsets, period boundaries, HalfYear, DayType, Prev Day)
+
+Use `build_date_table_object()` instead of `build_table()` when the table is `DimDate`. The `write_bim()` function asserts that the Date table's M expression contains `"DateValue"` — if it doesn't, the assertion fails and the BIM is not written.
+
+When generating BIM JSON directly without the Python script, copy the full M expression from the "Date Table Enriched M Expression" section below.
+
+### Rule 8 — Measures Must Be in a Separate Measure Table
+
+Measures must NEVER be placed inside fact tables or dimension tables. They must be in their own `"Measure"` table with:
+- A `DATATABLE` calculated partition
+- A hidden `_` column with `type: "calculatedTableColumn"`, `sourceColumn: "[_]"`, `isNameInferred: true`
+- All measures as children of the Measure table, not of any fact table
+
+The `write_bim()` function asserts that a table named `"Measure"` exists in the BIM and contains at least one measure. If measures end up in fact tables, the assertion fails.
+
+### Rule 9 — DatasetFolder Parameter Must Exist in model.expressions
+
+Every BIM must have a `DatasetFolder` M parameter in the `model.expressions` array. Without it, no table partition can resolve its CSV file path and Power BI will show a data source error on refresh.
+
+The `write_bim()` function asserts that an expression named `"DatasetFolder"` exists and contains the `IsParameterQuery=true` meta annotation.
+
 ---
 
 
@@ -2917,6 +2943,176 @@ def build_dataset_folder_expression():
         "expression": '"C:\\\\Users\\\\YourName\\\\Desktop\\\\Dataset" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]'
     }
 
+
+# ── DATE TABLE — ENRICHED M EXPRESSION ──────────────────────────────────────
+# The Date table does NOT use the simple CSV load partition that every other
+# table uses. Instead, it uses an enriched Power Query M expression that:
+#   - Reads only the Date column from DimDate.csv
+#   - Removes all other CSV columns (they are regenerated from the Date value)
+#   - Generates ~33 columns from the single Date column
+#   - Includes offsets (Day Offset, Month Offset, Quarter Offset, Year Offset)
+#   - Includes period boundaries (Start/End of Year, Month, Quarter, Week)
+#   - Includes HalfYear, DayType, and Prev Day
+#
+# This M expression is the ONLY correct partition source for the Date table.
+# Using the simple CSV load will result in a Date table with raw CSV columns
+# that don't include offsets, period boundaries, or calculated fields.
+#
+# The expression uses "DatasetFolder" — NOT "DataFolderPath" — to match the
+# DatasetFolder parameter defined in build_dataset_folder_expression().
+#
+# © 2026 Logeshkumar Sivakumar. All rights reserved. elogu2001@outlook.com
+
+def build_date_table_partition_m():
+    """
+    Returns the enriched M expression for the Date table partition.
+    This expression generates all date columns from a single Date column
+    in DimDate.csv.
+    """
+    return [
+        'let',
+        '    Source = Csv.Document(File.Contents(DatasetFolder & "\\\\DimDate.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.None]),',
+        '    #"Promoted Headers" = Table.PromoteHeaders( Source, [ PromoteAllScalars = true ] ),',
+        '    #"Removed Columns1" = Table.RemoveColumns(#"Promoted Headers", List.RemoveItems(Table.ColumnNames(#"Promoted Headers"), {"Date"})),',
+        '    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns1",{{"Date", "DateValue"}}),',
+        '    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"DateValue", type date}}),',
+        '    #"Inserted year" = Table.AddColumn(#"Changed Type", "Year", each Date.Year([DateValue]), type nullable number),',
+        '    #"Inserted month" = Table.AddColumn(#"Inserted year", "Month", each Text.PadStart(Text.From(Date.Month([DateValue])), 2, "0"), type nullable number),',
+        '    #"Inserted day" = Table.AddColumn(#"Inserted month", "Day", each Text.PadStart(Text.From(Date.Day([DateValue])), 2, "0"), type nullable number),',
+        '    #"Inserted quarter" = Table.AddColumn(#"Inserted day", "Quarter", each Text.PadStart(Text.From(Date.QuarterOfYear([DateValue])), 2, "0"), type nullable number),',
+        '    #"Inserted days in month" = Table.AddColumn(#"Inserted quarter", "Days in Month", each Date.DaysInMonth([DateValue]), type nullable number),',
+        '    #"Added custom" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted days in month", "Year Month Number", each Text.PadStart(Text.From([Year]), 0, "0") & Text.PadStart(Text.From([Month]), 2, "0")), {{"Year Month Number", type text}}),',
+        '    #"Inserted day name" = Table.AddColumn(#"Added custom", "Day Name", each Date.DayOfWeekName([DateValue]), type nullable text),',
+        '    #"Inserted first characters" = Table.AddColumn(#"Inserted day name", "Day Name Short", each Text.Start([Day Name], 3), type text),',
+        '    #"Inserted day of week" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted first characters", "Day of Week", each Date.DayOfWeek([DateValue], Day.Sunday)+1), {{"Day of Week", type number}}),',
+        '    #"Inserted day of year" = Table.AddColumn(#"Inserted day of week", "Day of Year", each Text.PadStart(Text.From(Date.DayOfYear([DateValue])), 3, "0"), type nullable number),',
+        '    #"Inserted month name" = Table.AddColumn(#"Inserted day of year", "Month Name", each Date.MonthName([DateValue]), type nullable text),',
+        '    #"Inserted first characters 1" = Table.AddColumn(#"Inserted month name", "Month Name Short", each Text.Start([Month Name], 3), type text),',
+        '    #"Added custom 1" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted first characters 1", "Year Month Name", each Text.PadStart(Text.From([Year]), 0, "0") & " " & [Month Name Short]), {{"Year Month Name", type text}}),',
+        '    #"Added custom 2" = Table.TransformColumnTypes(Table.AddColumn(#"Added custom 1", "Quarter Name", each "Q" & Text.PadStart(Text.From(Date.QuarterOfYear([DateValue])), 0, "0")), {{"Quarter Name", type text}}),',
+        '    #"Inserted merged column" = Table.AddColumn(#"Added custom 2", "Year Quarter Number", each Text.Combine({Text.From([Year]), Text.From([Quarter])}, ""), type text),',
+        '    #"Added custom 3" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted merged column", "Year Quarter Name", each Text.PadStart(Text.From([Year]), 0, "0") & " " & [Quarter Name]), {{"Year Quarter Name", type text}}),',
+        '    #"Inserted week of year" = Table.AddColumn(#"Added custom 3", "Week of year", each Text.PadStart(Text.From(Date.WeekOfYear([DateValue])), 2, "0"), type nullable number),',
+        '    #"Added custom 4" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted week of year", "Today", each DateTime.LocalNow()), {{"Today", type date}}),',
+        '    #"Added custom 5" = Table.TransformColumnTypes(Table.AddColumn(#"Added custom 4", "Day Offset", each Duration.Days([DateValue] - [Today])), {{"Day Offset", Int64.Type}}),',
+        '    #"Inserted division" = Table.AddColumn(#"Added custom 5", "Month Offset", each [Day Offset] / [Days in Month], type number),',
+        '    // NOTE: Please contact Logeshkumar Sivakumar (elogu2001@outlook.com) before making any changes',
+        '    #"Rounded off" = Table.TransformColumns(#"Inserted division", {{"Month Offset", each Number.RoundUp(_), type number}}),',
+        '    #"Inserted division 1" = Table.TransformColumnTypes(Table.AddColumn(#"Rounded off", "Quarter Offset", each [Month Offset] / 3), {{"Quarter Offset", type number}}),',
+        '    #"Rounded up" = Table.TransformColumns(#"Inserted division 1", {{"Quarter Offset", each Number.RoundUp(_), type nullable Int64.Type}}),',
+        '    #"Inserted integer-division" = Table.AddColumn(#"Rounded up", "Year Offset", each Number.IntegerDivide([Month Offset], 12), Int64.Type),',
+        '    #"Inserted start of year" = Table.AddColumn(#"Inserted integer-division", "Start of Year", each Date.StartOfYear([DateValue]), type nullable date),',
+        '    #"Inserted end of year" = Table.AddColumn(#"Inserted start of year", "End of Year", each Date.EndOfYear([DateValue]), type nullable date),',
+        '    #"Inserted start of month" = Table.AddColumn(#"Inserted end of year", "Start of Month", each Date.StartOfMonth([DateValue]), type nullable date),',
+        '    #"Inserted end of month" = Table.AddColumn(#"Inserted start of month", "End of Month", each Date.EndOfMonth([DateValue]), type nullable date),',
+        '    #"Inserted start of quarter" = Table.AddColumn(#"Inserted end of month", "Start of quarter", each Date.StartOfQuarter([DateValue]), type nullable date),',
+        '    #"Inserted end of quarter" = Table.AddColumn(#"Inserted start of quarter", "End of quarter", each Date.EndOfQuarter([DateValue]), type nullable date),',
+        '    #"Inserted start of week" = Table.AddColumn(#"Inserted end of quarter", "Start of week", each Date.StartOfWeek([DateValue]), type nullable date),',
+        '    // NOTE: Please contact Logeshkumar Sivakumar (elogu2001@outlook.com) before making any changes',
+        '    #"Inserted end of week" = Table.AddColumn(#"Inserted start of week", "End of week", each Date.EndOfWeek([DateValue]), type nullable date),',
+        '    #"Inserted conditional column" = Table.AddColumn(#"Inserted end of week", "HalfYear", each if [Quarter Name] = "Q1" then "H1" else if [Quarter Name] = "Q2" then "H1" else "H2"),',
+        '    #"Inserted conditional column 1" = Table.AddColumn(#"Inserted conditional column", "DayType", each if [Day Name] = "Saturday" then "WeekEnd" else if [Day Name] = "Sunday" then "WeekEnd" else "WeekDay"),',
+        '    // NOTE: Please contact Logeshkumar Sivakumar (elogu2001@outlook.com) before making any changes',
+        '    #"Removed columns" = Table.RemoveColumns(#"Inserted conditional column 1", {"Today"}),',
+        '    #"Added Prev Day" = Table.TransformColumnTypes(Table.AddColumn(#"Removed columns", "Prev Day", each Date.AddDays([DateValue], -1)), {{"Prev Day", type date}}),',
+        '    #"Final Rename" = Table.RenameColumns(#"Added Prev Day",{{"DateValue", "Date"}})',
+        'in',
+        '    #"Final Rename"'
+    ]
+
+
+def build_date_table_columns():
+    """
+    Returns the column definitions for the enriched Date table.
+    These columns are generated by the M expression — they do NOT come from the CSV.
+    Each column has its correct dataType, description, sortByColumn, and visibility.
+    """
+    date_cols = [
+        # (name, sourceColumn, dataType, isHidden, sortByColumn, description)
+        ("Date",             "Date",             "dateTime", False, None,            "The calendar date. Primary join column to all fact tables."),
+        ("Year",             "Year",             "int64",    False, None,            "Four-digit calendar year (e.g., 2024)."),
+        ("Month",            "Month",            "string",   True,  None,            "Two-digit month number as text (01-12). Used for sorting; Month Name Short is the display column."),
+        ("Day",              "Day",              "string",   True,  None,            "Two-digit day of month as text (01-31)."),
+        ("Quarter",          "Quarter",          "string",   True,  None,            "Two-digit quarter number as text (01-04). Used for sorting; Quarter Name is the display column."),
+        ("Days in Month",    "Days in Month",    "int64",    False, None,            "Number of days in the month (28-31). Used in offset calculations."),
+        ("Year Month Number","Year Month Number","string",   True,  None,            "Year and month as YYYYMM text. Sort key for Year Month Name."),
+        ("Year Month Name",  "Year Month Name",  "string",   False, "Year Month Number", "Human-readable month label (e.g., 2024 Jan). Used on report axes."),
+        ("Day Name",         "Day Name",         "string",   False, "Day of Week",  "Full name of the weekday (e.g., Monday)."),
+        ("Day Name Short",   "Day Name Short",   "string",   False, "Day of Week",  "Three-letter weekday abbreviation (e.g., Mon)."),
+        ("Day of Week",      "Day of Week",      "int64",    True,  None,            "Day of week number (1=Sunday, 7=Saturday). Sort key for Day Name."),
+        ("Day of Year",      "Day of Year",      "string",   True,  None,            "Day number within the year (001-366) as text."),
+        ("Month Name",       "Month Name",       "string",   False, "Month",         "Full month name (e.g., January)."),
+        ("Month Name Short", "Month Name Short", "string",   False, "Month",         "Three-letter month abbreviation (e.g., Jan). Used on compact chart axes."),
+        ("Quarter Name",     "Quarter Name",     "string",   False, "Quarter",       "Quarter formatted as Q1, Q2, Q3, Q4. Used on report axes."),
+        ("Year Quarter Number","Year Quarter Number","string",True,  None,            "Year and quarter as YYYYQQ text. Sort key for Year Quarter Name."),
+        ("Year Quarter Name","Year Quarter Name", "string",   False, "Year Quarter Number", "Formatted quarter label (e.g., 2024 Q1). Used in quarterly trend visuals."),
+        ("Week of year",     "Week of year",     "string",   True,  None,            "Week number within the year (01-53) as text."),
+        ("Day Offset",       "Day Offset",       "int64",    False, None,            "Number of days from today. 0 = today, -1 = yesterday, +1 = tomorrow. Used for relative date filters."),
+        ("Month Offset",     "Month Offset",     "int64",    False, None,            "Number of months from the current month. 0 = this month, -1 = last month. Used for trailing period calculations."),
+        ("Quarter Offset",   "Quarter Offset",   "int64",    False, None,            "Number of quarters from the current quarter. 0 = this quarter."),
+        ("Year Offset",      "Year Offset",      "int64",    False, None,            "Number of years from the current year. 0 = this year, -1 = last year."),
+        ("Start of Year",    "Start of Year",    "dateTime", True,  None,            "First day of the year (Jan 1). Used in YTD calculations."),
+        ("End of Year",      "End of Year",      "dateTime", True,  None,            "Last day of the year (Dec 31)."),
+        ("Start of Month",   "Start of Month",   "dateTime", True,  None,            "First day of the month. Used in MTD calculations."),
+        ("End of Month",     "End of Month",     "dateTime", True,  None,            "Last day of the month."),
+        ("Start of quarter", "Start of quarter", "dateTime", True,  None,            "First day of the quarter. Used in QTD calculations."),
+        ("End of quarter",   "End of quarter",   "dateTime", True,  None,            "Last day of the quarter."),
+        ("Start of week",    "Start of week",    "dateTime", True,  None,            "First day of the week (Monday by default)."),
+        ("End of week",      "End of week",      "dateTime", True,  None,            "Last day of the week (Sunday by default)."),
+        ("HalfYear",         "HalfYear",         "string",   False, "Quarter",       "H1 (Q1-Q2) or H2 (Q3-Q4). Used for half-year comparisons."),
+        ("DayType",          "DayType",          "string",   False, None,            "WeekDay or WeekEnd. Used for working-day-only filters."),
+        ("Prev Day",         "Prev Day",         "dateTime", True,  None,            "The calendar date one day before the current row. Used in day-over-day change calculations."),
+    ]
+    columns = []
+    for name, src, dtype, hidden, sort_by, desc in date_cols:
+        col = {
+            "name":         name,
+            "dataType":     dtype,
+            "sourceColumn": src,
+            "isHidden":     hidden,
+            "description":  desc,
+            "annotations":  [{"name": "SummarizationSetBy", "value": "User"}]
+        }
+        if sort_by:
+            col["sortByColumn"] = sort_by
+        columns.append(col)
+    return columns
+
+
+def build_date_table_object():
+    """
+    Builds the complete [Dim] Date table object using the enriched M expression.
+    This function is called INSTEAD of build_table() when the table is DimDate.
+    """
+    columns     = build_date_table_columns()
+    col_names   = {c["name"] for c in columns}
+    hierarchies = build_hierarchies("[Dim] Date", col_names)
+
+    table_obj = {
+        "name":        "[Dim] Date",
+        "description": (
+            "Calendar reference table. The partition M expression generates all 33 "
+            "columns from a single Date column in DimDate.csv — including offsets, "
+            "period boundaries, HalfYear, DayType, and Prev Day. Every fact table "
+            "joins to this table on its date column."
+        ),
+        "columns":     columns,
+        "partitions": [{
+            "name":     "[Dim] Date",
+            "dataView": "full",
+            "source": {
+                "type": "m",
+                "expression": build_date_table_partition_m()
+            }
+        }],
+        "annotations": [
+            {"name": "PBI_ResultType", "value": "Table"}
+        ]
+    }
+    if hierarchies:
+        table_obj["hierarchies"] = hierarchies
+    return table_obj
+
 # ── STEP 3: BUILD RELATIONSHIPS ──────────────────────────────────────────────
 def build_relationships(present_tables):
     """
@@ -3290,6 +3486,60 @@ def write_bim(tables, relationships, measures):
             "expressions": [build_dataset_folder_expression()]
         }
     }
+
+    # ── PRE-WRITE ASSERTIONS ─────────────────────────────────────────────────
+    # These three assertions MUST pass before the BIM is written to disk.
+    # If any fails, write_bim() stops with a clear error message so the user
+    # can identify the root cause without deploying a broken model.
+
+    bim_tables = model["model"]["tables"]
+    bim_exprs  = model["model"]["expressions"]
+
+    # ASSERTION 1: Measure table must exist as a separate table
+    measure_tables = [t for t in bim_tables if t["name"] == "Measure"]
+    assert len(measure_tables) == 1, (
+        "ASSERTION FAILED: Measure table not found as a separate table in the BIM. "
+        "Measures must live in their own 'Measure' table with a DATATABLE partition "
+        "and hidden '_' column — never inside a fact or dimension table. "
+        f"Tables in BIM: {[t['name'] for t in bim_tables]}"
+    )
+    # Verify the Measure table has measures and a partition
+    mt = measure_tables[0]
+    assert len(mt.get("measures", [])) > 0, (
+        "ASSERTION FAILED: Measure table exists but contains zero measures. "
+        "The measure generation pipeline did not produce any output."
+    )
+    assert len(mt.get("partitions", [])) > 0, (
+        "ASSERTION FAILED: Measure table has no partition. "
+        "It must have a DATATABLE calculated partition."
+    )
+
+    # ASSERTION 2: DatasetFolder expression must exist
+    ds_exprs = [e for e in bim_exprs if e.get("name") == "DatasetFolder"]
+    assert len(ds_exprs) == 1, (
+        "ASSERTION FAILED: DatasetFolder M parameter expression not found in "
+        "model.expressions. Without it, no table partition can resolve its CSV path. "
+        f"Expressions found: {[e.get('name') for e in bim_exprs]}"
+    )
+    # Verify the expression contains the meta annotation
+    ds_expr_text = ds_exprs[0].get("expression", "")
+    assert "IsParameterQuery=true" in ds_expr_text, (
+        "ASSERTION FAILED: DatasetFolder expression is missing the meta annotation. "
+        "It must contain: meta [IsParameterQuery=true, Type=\"Text\", IsParameterQueryRequired=true]"
+    )
+
+    # ASSERTION 3: Date table must use enriched M expression (not simple CSV load)
+    date_tables = [t for t in bim_tables if t["name"] == "[Dim] Date"]
+    if date_tables:
+        date_m = date_tables[0].get("partitions", [{}])[0].get("source", {}).get("expression", [])
+        date_m_text = " ".join(date_m) if isinstance(date_m, list) else str(date_m)
+        assert "DateValue" in date_m_text, (
+            "ASSERTION FAILED: [Dim] Date table is using the simple CSV load partition "
+            "instead of the enriched M expression. The enriched expression renames Date "
+            "to DateValue and generates 33 columns from it. Use build_date_table_object() "
+            "instead of build_table() for DimDate."
+        )
+    print(f"✅ All 3 pre-write assertions passed")
     out_path = os.path.join(OUTPUT_FOLDER, BIM_FILENAME)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(model, f, indent=2, ensure_ascii=False)
@@ -3326,22 +3576,25 @@ def write_measures_reference(measures):
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if MODE == "integrated":
-        tables = [
-            build_table(raw, TABLE_NAME_MAP.get(raw, raw), cols)
-            for raw, cols in table_schemas.items()
-            if raw in TABLE_NAME_MAP
-        ]
+        tables = []
+        for raw, cols in table_schemas.items():
+            if raw not in TABLE_NAME_MAP:
+                continue
+            if raw == "DimDate":
+                tables.append(build_date_table_object())  # enriched M with 33 columns
+            else:
+                tables.append(build_table(raw, TABLE_NAME_MAP[raw], cols))
     else:
         # In standalone, display_table_names already are the BIM table names
-        tables = [
-            build_table(
-                raw_name_from_display(dn),    # reverse-map to raw
-                dn,                           # keep display name
-                table_schemas.get(raw_name_from_display(dn), [])
-            )
-            for dn in display_table_names
-            if dn != "Measure"
-        ]
+        tables = []
+        for dn in display_table_names:
+            if dn == "Measure":
+                continue
+            raw = raw_name_from_display(dn)
+            if raw == "DimDate":
+                tables.append(build_date_table_object())  # enriched M with 33 columns
+            else:
+                tables.append(build_table(raw, dn, table_schemas.get(raw, [])))
 
     relationships = build_relationships(present_tables)
     measures      = build_measures(INDUSTRY_NAME, USE_CASES, PERSONA, VOCAB)
