@@ -113,21 +113,34 @@ Tables requiring hierarchies: `[Dim] Date`, `[Dim] Account`, `[Dim] Product`, `[
 
 When generating a BIM JSON directly, look at the column names of every dimension table — if it has level columns, build a hierarchy. Do not skip this step.
 
-### Rule 3 — Relationship Columns Use sourceColumn, Not Display Name
+### Rule 3 — Relationship Columns Use Column NAME (Display Name), Not sourceColumn
 
-In the BIM `relationships` array, the `fromColumn` and `toColumn` values MUST match the `sourceColumn` property of the column (the original CSV header), NOT the renamed display name.
+In the BIM `relationships` array, the `fromColumn` and `toColumn` values MUST match the column's `name` property (the display name after rename) — **NOT** the `sourceColumn` property.
+
+The Tabular Object Model (TOM) resolves relationship columns by looking up the `name` property in the table's column collection. If `fromColumn` contains a `sourceColumn` value that doesn't match any column `name`, the entire relationship resolves to `(none) ∞←1 (none)` in Tabular Editor.
 
 ```json
-// CORRECT
-{ "fromTable": "[Fact] Financial", "fromColumn": "AccountKey",  "toTable": "[Dim] Account", "toColumn": "AccountKey" }
+// CORRECT — uses column display name (the "name" property)
+{ "fromTable": "[Fact] Financial", "fromColumn": "Account Key",  "toTable": "[Dim] Account", "toColumn": "Account Key" }
 
-// WRONG — Power BI silently fails to wire the relationship
-{ "fromTable": "[Fact] Financial", "fromColumn": "Account Key", "toTable": "[Dim] Account", "toColumn": "Account Key" }
+// WRONG — uses sourceColumn value; no column NAME matches "AccountKey"
+{ "fromTable": "[Fact] Financial", "fromColumn": "AccountKey", "toTable": "[Dim] Account", "toColumn": "AccountKey" }
 ```
 
-When a column is defined as `{ "name": "Account Key", "sourceColumn": "AccountKey", ... }`, all relationships referencing it must use `"AccountKey"` not `"Account Key"`.
+When a column is defined as `{ "name": "Account Key", "sourceColumn": "AccountKey", ... }`, the relationship must reference `"Account Key"` (display name).
 
-This is the single most common reason models deploy without errors but show no relationships in Model view.
+**Special case — [Dim] Date joins:**
+The enriched Date table M expression renames its date column to `"Date"` (not `"Date Key"`). So Date relationships have asymmetric column references:
+- `fromColumn: "Date Key"` (the FK column in the fact table, renamed from `DateKey`)
+- `toColumn: "Date"` (the primary column in the enriched Date table)
+
+```json
+// CORRECT — asymmetric: fact FK is "Date Key", dim PK is "Date"
+{ "fromTable": "[Fact] Financial", "fromColumn": "Date Key", "toTable": "[Dim] Date", "toColumn": "Date" }
+
+// WRONG — symmetric; [Dim] Date has no column named "Date Key"
+{ "fromTable": "[Fact] Financial", "fromColumn": "Date Key", "toTable": "[Dim] Date", "toColumn": "Date Key" }
+```
 
 ### Rule 4 — Measure Table Placeholder Column Requires Three Specific Properties
 
@@ -906,74 +919,74 @@ All relationships are Many-to-One (fact → dimension), active unless noted.
 ```python
 UNIVERSAL_RELATIONSHIPS = [
     # [Fact] Financial
-    {"from_table": "[Fact] Financial", "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "AccountKey",      "to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "GeographyKey",    "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "ScenarioKey",     "to_table": "[Dim] Scenario",      "to_col": "ScenarioKey",      "active": True},
-    {"from_table": "[Fact] Financial", "from_col": "DepartmentKey",   "to_table": "[Dim] Department",    "to_col": "DepartmentKey",    "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Account Key",      "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Scenario Key",     "to_table": "[Dim] Scenario",      "to_col": "Scenario Key",      "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Department Key",   "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
 
     # [Fact] Plan
-    {"from_table": "[Fact] Plan",      "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "AccountKey",      "to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "GeographyKey",    "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
-    {"from_table": "[Fact] Plan",      "from_col": "ScenarioKey",     "to_table": "[Dim] Scenario",      "to_col": "ScenarioKey",      "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Account Key",      "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Scenario Key",     "to_table": "[Dim] Scenario",      "to_col": "Scenario Key",      "active": True},
 
     # [Fact] Invoice Line
-    {"from_table": "[Fact] Invoice Line","from_col": "DateKey",       "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "ProductKey",    "to_table": "[Dim] Product",       "to_col": "ProductKey",       "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "CustomerKey",   "to_table": "[Dim] Customer",      "to_col": "CustomerKey",      "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "GeographyKey",  "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
-    {"from_table": "[Fact] Invoice Line","from_col": "BusinessUnitKey","to_table":"[Dim] Business Unit","to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Date Key",       "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Product Key",    "to_table": "[Dim] Product",       "to_col": "Product Key",       "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Customer Key",   "to_table": "[Dim] Customer",      "to_col": "Customer Key",      "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Geography Key",  "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Business Unit Key","to_table":"[Dim] Business Unit","to_col": "Business Unit Key", "active": True},
 
     # [Fact] Operational (industry-specific — generate only if table exists)
-    {"from_table": "[Fact] Operational","from_col": "DateKey",        "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Operational","from_col": "ProductKey",     "to_table": "[Dim] Product",       "to_col": "ProductKey",       "active": True},
-    {"from_table": "[Fact] Operational","from_col": "GeographyKey",   "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
-    {"from_table": "[Fact] Operational","from_col": "BusinessUnitKey","to_table":"[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Product Key",     "to_table": "[Dim] Product",       "to_col": "Product Key",       "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Geography Key",   "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Business Unit Key","to_table":"[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
 
     # [Fact] Payroll
-    {"from_table": "[Fact] Payroll",   "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Payroll",   "from_col": "EmployeeKey",     "to_table": "[Dim] Employee",      "to_col": "EmployeeKey",      "active": True},
-    {"from_table": "[Fact] Payroll",   "from_col": "DepartmentKey",   "to_table": "[Dim] Department",    "to_col": "DepartmentKey",    "active": True},
-    {"from_table": "[Fact] Payroll",   "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Employee Key",     "to_table": "[Dim] Employee",      "to_col": "Employee Key",      "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Department Key",   "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
 
     # [Fact] Expense Claim
-    {"from_table": "[Fact] Expense Claim","from_col": "DateKey",        "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Expense Claim","from_col": "EmployeeKey",    "to_table": "[Dim] Employee",      "to_col": "EmployeeKey",      "active": True},
-    {"from_table": "[Fact] Expense Claim","from_col": "DepartmentKey",  "to_table": "[Dim] Department",    "to_col": "DepartmentKey",    "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "Employee Key",    "to_table": "[Dim] Employee",      "to_col": "Employee Key",      "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "Department Key",  "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
 
     # [Fact] Depreciation
-    {"from_table": "[Fact] Depreciation","from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Depreciation","from_col": "AssetKey",        "to_table": "[Dim] Asset",         "to_col": "AssetKey",         "active": True},
+    {"from_table": "[Fact] Depreciation","from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Depreciation","from_col": "Asset Key",        "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
 
     # [Fact] Asset Maintenance
-    {"from_table": "[Fact] Asset Maintenance","from_col": "DateKey",    "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Asset Maintenance","from_col": "AssetKey",   "to_table": "[Dim] Asset",         "to_col": "AssetKey",         "active": True},
+    {"from_table": "[Fact] Asset Maintenance","from_col": "Date Key",    "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Asset Maintenance","from_col": "Asset Key",   "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
 
     # [Fact] Tax
-    {"from_table": "[Fact] Tax",       "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Tax",       "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Tax",       "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Tax",       "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
 
     # [Fact] Utility
-    {"from_table": "[Fact] Utility",   "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Utility",   "from_col": "GeographyKey",    "to_table": "[Dim] Geography",     "to_col": "GeographyKey",     "active": True},
+    {"from_table": "[Fact] Utility",   "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Utility",   "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
 
     # [Fact] Journal Entry
-    {"from_table": "[Fact] Journal Entry","from_col": "DateKey",        "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Journal Entry","from_col": "AccountKey",     "to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
-    {"from_table": "[Fact] Journal Entry","from_col": "BusinessUnitKey","to_table":"[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "Account Key",     "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "Business Unit Key","to_table":"[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
 
     # [Fact] CapEx (capital-intensive industries only)
-    {"from_table": "[Fact] CapEx",     "from_col": "DateKey",         "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] CapEx",     "from_col": "AssetKey",        "to_table": "[Dim] Asset",         "to_col": "AssetKey",         "active": True},
-    {"from_table": "[Fact] CapEx",     "from_col": "BusinessUnitKey","to_table": "[Dim] Business Unit", "to_col": "BusinessUnitKey", "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "Asset Key",        "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
 
     # [Fact] Macro Event Impact
-    {"from_table": "[Fact] Macro Event Impact","from_col": "DateKey",   "to_table": "[Dim] Date",          "to_col": "DateKey",          "active": True},
-    {"from_table": "[Fact] Macro Event Impact","from_col": "EventKey","to_table":"[Dim] Macro Event","to_col": "EventKey",   "active": True},
-    {"from_table": "[Fact] Macro Event Impact","from_col": "AccountKey","to_table": "[Dim] Account",       "to_col": "AccountKey",       "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "Date Key",   "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "Event Key","to_table":"[Dim] Macro Event","to_col": "Event Key",   "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "Account Key","to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
 ]
 ```
 
@@ -3114,36 +3127,74 @@ def build_date_table_object():
     return table_obj
 
 # ── STEP 3: BUILD RELATIONSHIPS ──────────────────────────────────────────────
-def build_relationships(present_tables):
+def build_relationships(present_tables, all_tables):
     """
     Builds the relationships array for the BIM.
 
-    CRITICAL: fromColumn and toColumn values come from from_col/to_col in
-    UNIVERSAL_RELATIONSHIPS — these are the camelCase source column names
-    (e.g. "AccountKey", "DateKey") that match the sourceColumn property of
-    each column definition in the BIM. Power BI resolves relationships by
-    sourceColumn, NOT by display name.
+    CRITICAL — COLUMN REFERENCE RULE (verified against Tabular Editor + Power BI):
+        fromColumn and toColumn values use the column's NAME property
+        (display name after rename), NOT the sourceColumn property.
 
-    A relationship like { fromColumn: "Account Key" } silently fails to wire —
-    the model loads but the Model view shows no line between the tables.
+        The Tabular Object Model resolves columns by their `name` field.
+        Using the sourceColumn value (e.g. "AccountKey" instead of "Account Key")
+        causes EVERY relationship to show "(none) ∞←1 (none)" in Tabular Editor
+        because no column with that name exists in the table.
+
+    SPECIAL CASE — [Dim] Date:
+        The enriched Date table M expression produces a column named "Date"
+        (not "Date Key"). So Date relationships are asymmetric:
+            fromColumn: "Date Key"  (FK in fact table, renamed from DateKey)
+            toColumn:   "Date"      (PK in enriched Date table)
+
+    VALIDATION:
+        After building each relationship, this function checks that fromColumn
+        and toColumn actually exist in their respective tables. Relationships
+        referencing non-existent columns are skipped with a warning printed
+        to the terminal.
+
+    Args:
+        present_tables: set of raw table names present in the dataset
+        all_tables:     list of built table objects (with column names)
     """
+    # Build a lookup: table display name → set of column display names
+    table_cols = {}
+    for t in all_tables:
+        table_cols[t["name"]] = {col["name"] for col in t.get("columns", [])}
+
     rels = []
+    skipped = 0
     for r in UNIVERSAL_RELATIONSHIPS:
         from_raw = reverse_display_name(r["from_table"])
         to_raw   = reverse_display_name(r["to_table"])
-        # Accept either raw name or display name in present_tables
-        from_ok = from_raw in present_tables or r["from_table"] in present_tables
-        to_ok   = to_raw   in present_tables or r["to_table"]   in present_tables
-        if from_ok and to_ok:
-            rels.append({
-                "name":                   f"rel_{from_raw}_{r['from_col']}",
-                "fromTable":              r["from_table"],
-                "fromColumn":             r["from_col"],   # camelCase source name
-                "toTable":                r["to_table"],
-                "toColumn":               r["to_col"],     # camelCase source name
-                "crossFilteringBehavior": "oneDirection",
-                "isActive":               r["active"]
-            })
+        from_ok  = from_raw in present_tables or r["from_table"] in present_tables
+        to_ok    = to_raw   in present_tables or r["to_table"]   in present_tables
+        if not (from_ok and to_ok):
+            continue
+
+        # Validate columns exist in their tables
+        from_cols = table_cols.get(r["from_table"], set())
+        to_cols   = table_cols.get(r["to_table"], set())
+        if r["from_col"] not in from_cols:
+            print(f"  ⚠️  Skipping relationship: column '{r['from_col']}' not found in {r['from_table']}  (available: {sorted(from_cols)[:5]}...)")
+            skipped += 1
+            continue
+        if r["to_col"] not in to_cols:
+            print(f"  ⚠️  Skipping relationship: column '{r['to_col']}' not found in {r['to_table']}  (available: {sorted(to_cols)[:5]}...)")
+            skipped += 1
+            continue
+
+        rels.append({
+            "name":                   f"rel_{from_raw}_{r['from_col'].replace(' ', '')}",
+            "fromTable":              r["from_table"],
+            "fromColumn":             r["from_col"],   # column NAME (display), not sourceColumn
+            "toTable":                r["to_table"],
+            "toColumn":               r["to_col"],     # column NAME (display), not sourceColumn
+            "crossFilteringBehavior": "oneDirection",
+            "isActive":               r["active"]
+        })
+    if skipped:
+        print(f"  ℹ️  {skipped} relationship(s) skipped due to missing columns")
+    print(f"  ✅ {len(rels)} relationships built")
     return rels
 
 # ── STEP 1b: DISCOVER MEASURE VOCABULARY ────────────────────────────────────
@@ -3596,7 +3647,7 @@ if __name__ == "__main__":
             else:
                 tables.append(build_table(raw, dn, table_schemas.get(raw, [])))
 
-    relationships = build_relationships(present_tables)
+    relationships = build_relationships(present_tables, tables)
     measures      = build_measures(INDUSTRY_NAME, USE_CASES, PERSONA, VOCAB)
 
     bim_path = write_bim(tables, relationships, measures)
@@ -3636,7 +3687,7 @@ The currency format must match the currency selected during intake of the enterp
 | Relationship creation | Only create if both sides are present in CSV folder |
 | Hierarchies | Add `[H]`-prefixed hierarchies to all applicable dimension tables. Only write a hierarchy when all its level columns exist in the table |
 | Sort by column | Apply `sortByColumn` to all label columns. Months, quarters, day names, accounts, and product/geography level names must never sort alphabetically. Uses `SORT_RULES` dict for known tables and `detect_generic_sort_relationships()` for any other table |
-| Relationship column names | `fromColumn` and `toColumn` in relationships MUST use the `sourceColumn` value (camelCase, matches CSV header) — never the display name. `"AccountKey"` not `"Account Key"`. Wrong names cause silent relationship failure |
+| Relationship column names | `fromColumn` and `toColumn` in relationships MUST use the column's `name` property (display name after rename, e.g. `"Account Key"`), NOT `sourceColumn` (e.g. `"AccountKey"`). Using sourceColumn causes (none) on both sides. Special case: [Dim] Date to_col is `"Date"` not `"Date Key"` because the enriched M expression names the column `"Date"` |
 | Measure table column | The `_` placeholder column MUST have `type: "calculatedTableColumn"`, `sourceColumn: "[_]"` (with square brackets), and `isNameInferred: true` — all three. Missing any one blocks deployment |
 | No duplicate measure names | Run `Counter` check on measure names before writing BIM. Tabular Editor refuses to deploy when two measures share a name across any folders |
 | Measure folders | Use numeric prefix; only generate selected folders |
@@ -4203,7 +4254,8 @@ If you want to add or edit a specific measure without rebuilding the full BIM:
 | Measures show blank in visuals | Filter context excludes all rows | Add [Dim] Date and [Dim] Scenario slicers to the page and select values |
 | Display folders not visible in Fields pane | Power BI Desktop is in compact field list mode | Click the ⋯ menu at the top of Fields pane → Show display folders |
 | DatasetFolder path error on refresh | Backslash format wrong in the BIM | In Tabular Editor, check DatasetFolder uses single backslashes: `C:\Users\...` |
-| Model deploys but relationships missing | `fromColumn`/`toColumn` used display name instead of source column | Re-run build_model.py — all relationship references now use camelCase source names like "AccountKey" |
+| Model deploys but relationships show (none) ∞←1 (none) | `fromColumn`/`toColumn` used `sourceColumn` values instead of column `name` (display name). TOM resolves by `name` | Re-run build_model.py — relationships now use display names. build_relationships() validates columns exist before writing |
+| Date relationships show (none) on one side | [Dim] Date's column is `"Date"` (from enriched M) but relationship used `"Date Key"` | Re-run build_model.py — Date to_col is now `"Date"`, asymmetric with fact table's `"Date Key"` |
 | "Column '_' missing SourceColumn property" deploy error | Measure table placeholder column missing required properties | Re-run build_model.py — the `_` column now carries `type`, `sourceColumn: "[_]"`, and `isNameInferred: true` |
 | "Item 'XXX' already exists in the collection" deploy error | Duplicate measure name across folders | Re-run build_model.py — `add_measure_annotations()` now raises a clear ValueError listing the duplicate and its folders before the BIM is written |
 | Every column shows as "Text" type in Power BI | Pandas dtype inference returned `object` for every column | Re-run build_model.py — `infer_data_type()` now uses column name pattern matching, not pandas dtype |
