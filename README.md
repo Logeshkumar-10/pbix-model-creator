@@ -10,229 +10,70 @@
 
 ---
  
-## What It Does
+## What this skill does
  
-This skill turns a raw enterprise planning dataset - or an existing PBIX file - into a deployment-ready Power BI semantic model in a single session.
+Given a dataset — whether produced earlier in the same conversation by a dataset-creator skill, or uploaded as an existing `.pbix` file with optional documentation — this skill produces:
  
-It generates a `model.bim` file (Tabular Editor compatible) containing:
+| Output file | Purpose |
+|---|---|
+| `model.bim` | The semantic model itself: tables, columns, relationships, hierarchies, measures, descriptions |
+| `build_model.py` | A Python script that generates everything; rerunnable any time the schema changes |
+| `[name]_model_guide_public.md` | Plain-English guide for report developers — what's in the model, what to build |
+| `[name]_model_guide_internal.md` | Full technical reference — private, for the model author |
+| `measures_reference.md` | Quick lookup of every measure: folder, format, description, full DAX |
  
-- **Renamed tables** with `[Dim]` / `[Fact]` prefix convention
-- **Renamed columns** with camelCase split, FK columns hidden
-- **All relationships** wired - 30 to 70+ depending on the dataset
-- **Industry-native DAX measures** in numbered display folders
-- **Descriptions** on every table, column, and measure
-- **Two documentation files** - a public model guide and an internal technical reference
-The measures, folder names, and DAX formulas are **fully dynamic** - driven by the actual industry, real `DimScenario` values, `DimAccount` structure, and operational column names read from the dataset. No hardcoded strings. No generic `KPI & Ratios` folders.
- 
----
- 
-## Two Input Modes
- 
-| Mode | When to Use | What It Reads |
-|------|------------|---------------|
-| **Mode 1 - Integrated** | Immediately after running the Enterprise Dataset Creator skill | CSV files + documentation guides. Carries industry, company, and column names forward automatically. |
-| **Mode 2 - Standalone** | When uploading an existing PBIX or description document | Parses the PBIX `DiagramLayout` for table names. Resolves descriptions from uploaded docs or the built-in catalogue. |
+All five files are generated together in one run, every time — never partially, never on request only.
  
 ---
  
-## Output Files (All Generated in One Run)
+## Why it's split into three files
  
-| File | Purpose |
-|------|---------|
-| `[industry]_model.bim` | The semantic model - open in Tabular Editor, deploy to Power BI Desktop |
-| `build_model.py` | The Python script that generated the BIM - rerunnable |
-| `[industry]_model_guide_public.md` | Report developer guide - measure descriptions, report page blueprints |
-| `[industry]_model_guide_internal.md` | Technical reference - full DAX, relationship map, column visibility, deployment notes |
-| `measures_reference.md` | All measures by folder - name, format, description, DAX formula |
+As of v3.0, the skill is no longer one monolithic file. It's split because the skill handles **two structurally different kinds of dataset**, and forcing both through one set of assumptions was producing a poor fit for one of them.
+ 
+```
+enterprise-pbix-model-builder/
+├── SKILL.md                     ← always read first (≈330 lines)
+└── references/
+    ├── planning.md               ← read only for planning/financial datasets (≈5,360 lines)
+    └── non-planning.md           ← read only for chart-showcase/behavioural datasets (≈371 lines)
+```
+ 
+**`SKILL.md`** contains everything genuinely universal regardless of dataset shape: the dataset-shape decision step, input-mode detection, the 9 critical BIM generation rules, format string standards, the generation rules summary, the attribution requirements, and the shared output-file list. It is intentionally thin — a router, not a rulebook.
+ 
+**`references/planning.md`** is for datasets with a scenario dimension (Actual/Plan/Forecast), an account hierarchy, and a financial fact table feeding a P&L — Variance Analysis, YTD/QTD, EBITDA-style ratios, Scenario Comparison. It contains the full Mode 1/Mode 2 intake logic for that shape, the relationship map, the complete DAX measure architecture (including per-industry folder patterns like B2B SaaS billing metrics, Retail, Manufacturing), and a verbatim table/column description catalogue for the standard 13+ planning tables.
+ 
+**`references/non-planning.md`** is for datasets with no scenario or account structure — chart-feature showcases, behavioural/correlation data, competitive-positioning quadrants. It is deliberately *not* a generalized pattern library; it's a concrete worked template extracted from a real deployed model (a B2B SaaS bubble/scatter/quadrant demo), covering its exact table structure, relationship, and all 24 measures, with guidance on adapting that structure to a different non-planning dataset.
+ 
+This way, a non-planning dataset never gets pointed at planning-specific assumptions (a hardcoded relationship map built around `FactFinancial`/`FactPlan`/`FactPayroll`, or "universal" base measures that secretly require `[Dim] Scenario` to exist), and a planning dataset still gets the full depth of catalogue and pattern coverage it needs.
  
 ---
  
-## Industries - Fully Dynamic
+## How it decides which path to take
  
-The skill does not have a fixed list of supported industries. It works for **any industry** by researching the industry's standard terminology, KPI vocabulary, and account structure at generation time.
+Every run starts the same way, regardless of dataset shape:
  
-The industry name you provide drives everything - folder names, measure names, DAX formulas, account type filters, operational KPI columns, and the industry-specific report page blueprint. Two models built for different industries share no measure names or folder names. A Pharmaceutical model and a Hospitality model have nothing in common except the BIM structure.
- 
-**How industry affects the model:**
- 
-| Element | How It Changes by Industry |
-|---------|--------------------------|
-| Display folder names | Derived from the industry's reporting domains - e.g., `Revenue by Therapy Area` for Pharma, `Room Revenue & Rate` for Hospitality, `Subscription Revenue` for SaaS |
-| Measure names | Use the industry's own vocabulary - `RevPAR` not `Revenue per Unit`, `NIM %` not `Margin %`, `OEE %` not `Utilisation %` |
-| DAX filters | Read actual `AccountType` values from `DimAccount.csv` - never assume `"Revenue"` or `"COGS"` |
-| Scenario names | Read actual values from `DimScenario.csv` - work with `"Budget"` just as well as `"Plan"` |
-| Operational KPIs | Read column names from the Operational fact table header - column names vary by industry |
-| Report page blueprints | The public model guide's Section 4 generates pages specific to the industry's reporting cadence |
- 
-**Measure design is also dynamic by persona.** The same industry generates different measure naming styles depending on the selected end user:
- 
-| Persona | Naming Style | Focus |
-|---------|-------------|-------|
-| CFO / CEO | Concise - `EBITDA`, `Net Revenue`, `Margin %` | High-level P&L and variance |
-| FP&A Analyst | Descriptive - `YTD Net Revenue vs Plan`, `FYE vs Full Year Plan %` | Full variance stack and forecasting |
-| BI Developer | Technical - explicit table references, grain labels | Model coverage and edge cases |
-| Sales Leader | Commercial - `Pipeline Revenue`, `Win Rate %`, `ASP` | Revenue and commercial performance |
-| Operations Manager | Operational - `OEE %`, `Cost per Unit`, `Utilisation %` | Throughput and cost efficiency |
-| Investor / Board | Finance-standard - `EBITDA`, `ROIC`, `FCF`, `EPS` | Profitability and capital efficiency |
+1. **Step 0 — Determine Dataset Shape.** Before asking any other question, the skill checks (or asks) whether the dataset is planning-shaped or non-planning-shaped. This is based on what's actually present — `DimScenario`/`DimAccount`/`FactFinancial` (or equivalents) signal planning; a small number of flat tables built to drive specific chart visuals signal non-planning. If it's not obvious, it asks directly rather than guessing.
+2. **Load the matching reference file** — `references/planning.md` or `references/non-planning.md` — in full, before generating anything.
+3. **Input Mode Detection.** Independently of dataset shape, the skill also detects *where the schema comes from*: Mode 1 (Integrated, downstream of a dataset-creator skill already run in this conversation) or Mode 2 (Standalone, from an uploaded `.pbix` and/or description markdown).
+4. **Generate.** Once both the shape and the mode are known, the relevant reference file's intake questions, relationship logic, and measure design proceed, followed by the nine universal BIM rules from `SKILL.md` for the actual file generation.
+Dataset shape and input mode are independent — a non-planning dataset can come from either mode, and so can a planning one.
  
 ---
  
-## Prerequisites
+## The 9 critical BIM generation rules
  
-| Tool | Purpose | Cost |
-|------|---------|------|
-| [Claude](https://claude.ai) | The AI platform where the skill runs | Subscription required |
-| [Tabular Editor 2](https://tabulareditor.com) | Opens `model.bim` and deploys to Power BI Desktop | Free |
-| [Power BI Desktop](https://powerbi.microsoft.com) | The report layer | Free |
-| Python 3.10+ | Runs `build_model.py` to generate the BIM | Free |
+These live in `SKILL.md` and apply to every model this skill produces, regardless of shape. They cover the most common points where a generated BIM fails to deploy or deploys incorrectly:
  
----
- 
-## Installation
- 
-This skill uses the Claude Skills system. To install it:
- 
-1. Rename the downloaded file to `SKILL.md` and copy it to your Claude skills directory:
-```
-/mnt/skills/user/enterprise-pbix-model-builder/SKILL.md
-```
- 
-2. The skill is auto-detected when Claude starts. No restart required.
-3. Trigger it in any conversation with one of the phrases below:
-```
-create PBIX model
-build semantic model
-add DAX measures
-set up relationships
-create BIM file
-build Power BI model
-model my uploaded PBIX
-```
- 
----
- 
-## How to Use
- 
-### Mode 1 - After Running Enterprise Dataset Creator
- 
-If you have just generated a dataset with the [Enterprise Dataset Creator](https://github.com/logeshkumar/enterprise-planning-dataset-creator) skill in the same Claude session, simply invoke this skill:
- 
-```
-Build the Power BI model from the generated dataset.
-Use cases: Variance Analysis, YTD, Forecasting, Therapy Area Ranking.
-Primary user: FP&A Analyst.
-```
- 
-The skill detects the generated files automatically and asks only two questions: use cases and end user persona.
- 
-### Mode 2 - From an Existing PBIX
- 
-Upload your `.pbix` file (and optionally a description document) and invoke the skill:
- 
-```
-Model my uploaded PBIX.
-Industry: Branded Pharmaceutical.
-Use cases: Variance, YTD, Forecasting, Scenario Comparison.
-Primary user: CFO.
-```
- 
----
- 
-## Deploying the Generated BIM to Power BI Desktop
- 
-```
-1. Run build_model.py  →  model.bim is generated
-2. Open model.bim in Tabular Editor 2
-3. Edit the DatasetFolder expression - update the CSV folder path
-4. Press Ctrl+S  (mandatory before deploying)
-5. Model → Deploy to Power BI Desktop
-6. Select your running Power BI Desktop instance → OK
-7. Switch to Power BI Desktop → Home → Refresh
-8. Fields pane → Measure table → verify display folders
-```
- 
-### DatasetFolder Path Format
- 
-In the BIM file, the path must use double backslashes:
- 
-```json
-"expression": "\"D:\\\\Projects\\\\Dataset\" meta [IsParameterQuery=true, Type=\"Text\", IsParameterQueryRequired=true]"
-```
- 
----
- 
-## BIM Compatibility
- 
-| Property | Value | Location in BIM |
-|----------|-------|----------------|
-| `compatibilityLevel` | `1600` | Root level |
-| `defaultPowerBIDataSourceVersion` | `PowerBI_V3` | Inside `model` object |
-| `discourageImplicitMeasures` | `true` | Inside `model` object |
-| Measure table anchor column | `_` (hidden, calculated) | `DATATABLE( "_", STRING, {{""}} )` |
-| Hierarchy naming convention | `[H] ` prefix on all hierarchies | `[H] Date`, `[H] Geography`, `[H] Account Hierarchy` |
-| Sort behaviour | `sortByColumn` applied to label columns | Months → Month Number, Quarter Label → Quarter, Account Name → Sort Order, Level N Name → Level N Key |
-| Relationship column references | `fromColumn` / `toColumn` use column `name` (display name) | `"Account Key"` not `"AccountKey"`. Date table special case: `toColumn: "Date"` not `"Date Key"` |
-| Measure table placeholder | Calculated table column with three required properties | `type: "calculatedTableColumn"`, `sourceColumn: "[_]"`, `isNameInferred: true` |
-| Duplicate measure check | Counter-based validation before BIM is written | Raises `ValueError` with offending measure names and folders if any duplicates found |
-| Date table partition | Enriched M expression (33 generated columns) | Not the simple CSV load; includes offsets, boundaries, HalfYear, DayType, Prev Day |
-| Pre-write assertions | 3 assertions before BIM file is written | Measure table exists, DatasetFolder parameter present, Date table uses enriched M |
-| `linguisticMetadata` / `cultures` | Not included | - |
-| Tabular Editor 2 | Fully supported | - |
-| Tabular Editor 3 | Fully supported | - |
-| Power BI Pro / Premium / Fabric | Compatible | - |
- 
----
- 
-## Design Principles
- 
-- **Industry-native, not generic** - folder names and measure names use the terminology of the specific industry
-- **Reads data before writing code** - reads actual scenario names, account types, and column names from CSVs before generating any DAX
-- **Descriptions on everything** - every table, column, and measure carries a `description` property in the BIM
-- **Correct data type inference** - column types are resolved from name patterns (`infer_data_type()`), not pandas dtype inference. Keys → `int64`, dates → `dateTime`, amounts/rates → `double`, flag columns → `boolean`. Avoids the pandas default of typing all columns as `string` when reading zero-row CSV headers
-- **`[H]` prefixed hierarchies** - dimension tables (Account, Product, Geography, Date, Business Unit, Department, Customer, Supplier, Asset, Employee) automatically get named hierarchies. All hierarchy names start with `[H] ` so they are immediately identifiable in the Power BI field list
-- **Automatic `sortByColumn`** - label columns (Month Short Name, Quarter Label, Account Name in P&L order, hierarchy level names) get a `sortByColumn` property in the BIM so they sort correctly out of the box. No manual sort configuration in Power BI Desktop. Works for any dataset - known tables use the built-in `SORT_RULES` dict, unknown tables fall back to pattern-based detection (`X Label` → `X Number`, `X Short Name` → `X Number`)
-- **`PBI_FormatHint` on all measures** - ensures Power BI Desktop respects the `formatString` and does not auto-format
-- **Display-name-aware relationships** - BIM `fromColumn` / `toColumn` use the column `name` property (display name after rename), not `sourceColumn`. TOM resolves by `name`; using `sourceColumn` causes every relationship to show (none). Column existence is validated before writing - relationships referencing non-existent columns are skipped with a terminal warning
-- **Strict measure name uniqueness** - `add_measure_annotations()` runs a `Counter`-based duplicate check before any BIM is written. Halts with a clear error listing the duplicate name and the folders it appears in. Prevents the cryptic Tabular Editor `Item 'XXX' already exists in the collection` deploy failure
-- **Calculated-table column compliance** - the Measure table's hidden `_` placeholder column carries `type: "calculatedTableColumn"`, `sourceColumn: "[_]"`, and `isNameInferred: true`. All three are mandatory; without them Tabular Editor refuses to deploy
-- **No reconciliation measures** - every measure answers a business question
-- **No `linguisticMetadata`** - removed to prevent compatibility issues
-- **Enriched Date table** - the `[Dim] Date` table uses a Power Query M expression that generates 33 columns (offsets, period boundaries, HalfYear, DayType, Prev Day) from a single Date column in the CSV. Not the simple CSV load used by other tables
-- **Measure table enforced as separate** - measures are never placed in fact tables. A pre-write assertion verifies the Measure table exists, contains measures, and has a DATATABLE partition before the BIM is written
-- **DatasetFolder parameter enforced** - a pre-write assertion verifies the M parameter expression exists in `model.expressions` with the correct `IsParameterQuery=true` meta annotation
----
- 
-## Example - What Dynamic Output Looks Like (Pharma)
- 
-The folders, measure names, and DAX below are generated specifically for a Branded Pharmaceutical company. Running the same skill against a Retail, SaaS, or Banking dataset produces entirely different folders and measures - no overlap.
- 
-Running against the VivaNova Pharmaceuticals dataset produces:
- 
-```
-Tables        : 27  (13 dims + 13 facts + 1 Measure table)
-Relationships : 71
-Measures      : 86  across 13 pharma-native display folders
-Visible cols  : 314
-Hidden cols   : 145  (FK + hierarchy path columns)
-```
- 
-Display folders generated:
- 
-```
-00 | Base Measures
-01 | Revenue by Therapy Area
-02 | Gross-to-Net Revenue
-03 | Commercial Margin
-04 | R&D & Clinical Trial
-05 | Patent Cliff & LOE Risk
-06 | Operating Cost
-07 | Variance vs Plan
-08 | Period Trends & YTD
-09 | Forecasting
-10 | Scenario Comparison
-11 | Therapy Area & Product Ranking
-12 | Navigation & Labels
-```
+1. Data types must be inferred from column name patterns, never from a 0-row pandas read
+2. Hierarchies are created only where a real drill-path exists
+3. Relationship columns use the column's display `name`, never `sourceColumn`
+4. The Measure table's hidden `_` placeholder column needs three specific properties
+5. Measure names must be unique across all display folders
+6. `sortByColumn` is applied to every label column that has a paired numeric/ordinal column
+7. A standalone Date table, if one exists, must use the enriched M expression (33 generated columns) — datasets with no separate Date table skip this entirely
+8. Measures live only in a dedicated `Measure` table, never inside fact or dimension tables
+9. A `DatasetFolder` M parameter must exist in `model.expressions`, or no partition can resolve its CSV path
+
 ---
 ## Related Skills
 
