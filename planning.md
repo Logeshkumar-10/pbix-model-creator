@@ -1,0 +1,5360 @@
+# Planning / Financial Dataset Reference — Enterprise PBIX Model Builder
+
+> **Read this file in full when Step 0 in SKILL.md determined the dataset is Planning-shaped** —
+> i.e. it has (or is meant to have) a scenario dimension (Actual/Plan/Forecast), an
+> account hierarchy feeding a P&L, and a financial fact table at account × period × org-unit grain.
+>
+> This file assumes you've already read the universal BIM generation rules, format string
+> standards, generation rules summary, and shared output-file list in `SKILL.md`. It does not
+> repeat them — it covers everything that's specific to planning/financial datasets: intake,
+> relationship map, measure architecture, and the full table/column description catalogue.
+>
+> © 2026 Logeshkumar Sivakumar. All rights reserved. Contact: elogu2001@outlook.com
+
+---
+
+## Table of Contents
+
+1. [MODE 1 — Integrated (After Dataset Creator)](#mode-1--integrated-after-dataset-creator)
+2. [MODE 2 — Standalone (Upload PBIX + Description)](#mode-2--standalone-upload-pbix--description)
+3. [Shared Logic (Both Modes)](#shared-logic-both-modes)
+4. [Clarification Rule](#clarification-rule-shared--applies-after-mode-is-confirmed)
+5. [Table Naming Convention](#table-naming-convention)
+6. [Column Naming Rules](#column-naming-rules)
+7. [Relationship Map](#relationship-map)
+8. [DAX Measure Architecture](#dax-measure-architecture) — folder design, industry patterns, measure rules
+9. [BIM File Structure](#bim-file-structure) — DatasetFolder expression, Date table enriched M expression, hierarchy/sort templates
+10. [Python Script Template (`build_model.py`)](#python-script-templatebuild_modelpy) — full reference implementation including the built-in description lookup tables
+11. [Model Documentation Files](#model-documentation-files) — public guide, internal guide, deployment walkthrough, troubleshooting table, "Use Cases at a Glance"
+12. [Table & Column Description Catalogue](#table--column-description-catalogue) — verbatim descriptions for every standard planning table/column
+13. [Measure Description Rules](#measure-description-rules)
+
+Jump to whichever section you need — you don't have to read this file top to bottom. Sections 1–7 matter most during intake; 8–10 during generation; 11–13 while writing descriptions and documentation.
+
+---
+
+## MODE 1 — Integrated (After Dataset Creator)
+
+### Trigger Condition
+The enterprise-planning-dataset-creator skill completed in this conversation.
+CSV files and documentation files are available in the output folder.
+
+### What Mode 1 Carries Forward Automatically
+
+Do NOT ask again for anything already established by the dataset creator:
+
+| Already Known | Source |
+|--------------|--------|
+| Industry and sub-industry | Carried from dataset creator intake |
+| Company name | Carried from dataset creator |
+| Currency | Carried from dataset creator |
+| Revenue scale | Carried from dataset creator |
+| Geography | Carried from dataset creator |
+| Table list | Read from CSV output folder |
+| Column names | Read from CSV headers |
+| Table descriptions | Read from `*_dataset_guide_public.md` |
+| Column descriptions | Read from `*_dataset_guide_internal.md` |
+| Account structure | Read from `DimAccount.csv` |
+| Scenario names | Read from `DimScenario.csv` |
+| Macro events | Read from `DimMacroEvent.csv` |
+
+### Mode 1 — Clarification Questions (Only These Two)
+
+Ask these in a single message after confirming Mode 1 is active:
+
+```
+Great — I can see the dataset files. Before I build the model, two quick questions:
+
+1. Which reporting use cases should the DAX measures cover?
+   [ ] Variance Analysis        — Actual vs Plan vs Forecast with % deviation
+   [ ] Period-over-Period       — MoM, QoQ, YoY comparisons
+   [ ] Rolling Averages         — 3M, 6M, 12M rolling calculations
+   [ ] YTD / QTD / MTD          — Cumulative period aggregations
+   [ ] KPI & Ratio Analysis     — Gross Margin %, EBITDA %, DSO, Inventory Turns etc.
+   [ ] Forecasting              — Remaining forecast, full-year estimate (FYE), run-rate
+   [ ] Scenario Comparison      — Side-by-side Plan vs Forecast vs Revised Forecast
+   [ ] Ranking & Pareto         — Top N products / regions / accounts by value
+   [ ] Dynamic Selection        — Slicer-driven metric switching
+   (or type "all" to include everything)
+
+2. Who is the primary end user of the report?
+   A) CFO / CEO         B) FP&A Analyst      C) BI Developer
+   D) Sales Leader      E) Operations Manager F) Investor / Board
+```
+
+Do not ask about table naming — Mode 1 always uses the standard `[Dim] / [Fact]` prefix convention.
+
+### Mode 1 — File Reading Sequence
+
+Run this sequence to extract schema before generating any Python:
+
+```python
+# Step 1 — Discover available tables
+import os
+from pathlib import Path
+
+CSV_FOLDER = "./csv_output"  # adjust to actual output folder
+csv_files = {f.stem: f for f in Path(CSV_FOLDER).glob("*.csv")}
+present_tables = set(csv_files.keys())
+print(f"Found {len(present_tables)} tables: {sorted(present_tables)}")
+
+# Step 2 — Read column names from every CSV header (no data rows needed)
+import pandas as pd
+table_schemas = {}
+for raw_name, path in csv_files.items():
+    df_head = pd.read_csv(path, nrows=0)
+    table_schemas[raw_name] = list(df_head.columns)
+
+# Step 3 — Read industry and company from documentation files
+import glob
+public_docs  = glob.glob(f"{CSV_FOLDER}/*_dataset_guide_public.md")
+internal_docs = glob.glob(f"{CSV_FOLDER}/*_dataset_guide_internal.md")
+
+industry_name = ""
+company_name  = ""
+if public_docs:
+    with open(public_docs[0], encoding="utf-8") as f:
+        content = f.read()
+    # Extract from header — format is always "# [Company] — [Industry] Dataset"
+    first_line = content.split("\n")[0]
+    industry_name = extract_industry(first_line)   # parse from heading
+    company_name  = extract_company(first_line)    # parse from heading
+
+# Step 4 — Read DimScenario to get actual scenario names
+if "DimScenario" in csv_files:
+    dim_scenario = pd.read_csv(csv_files["DimScenario"])
+    scenario_names = dim_scenario["ScenarioName"].tolist()
+    # e.g. ["Actual", "Plan", "Forecast", "Revised Forecast"]
+
+# Step 5 — Read DimAccount leaf accounts to understand P&L structure
+if "DimAccount" in csv_files:
+    dim_account = pd.read_csv(csv_files["DimAccount"])
+    leaf_accounts = dim_account[dim_account["IsLeafNode"] == "Yes"]
+    account_types = leaf_accounts["AccountType"].unique().tolist()
+    # Use account_types to select correct industry KPI folder in measure catalogue
+
+# Step 6 — Read table and column descriptions from documentation
+table_descriptions = {}
+column_descriptions = {}
+if internal_docs:
+    table_descriptions, column_descriptions = parse_internal_doc(internal_docs[0])
+    # parse_internal_doc reads the Section 6a relationship map and column tables
+    # Returns dicts keyed by raw table name and raw column name
+```
+
+### Mode 1 — Description Sourcing
+
+Table and column descriptions come directly from the documentation files generated by the
+dataset creator skill. They are not regenerated — they are extracted as-is and mapped to
+the renamed display names in the BIM file.
+
+```python
+def parse_internal_doc(doc_path):
+    """
+    Extract table and column descriptions from the internal documentation file.
+    The internal doc contains a full table+column reference in Section 2 and Section 4.
+    Returns:
+        table_desc  : dict { raw_table_name: description_string }
+        column_desc : dict { raw_table_name: { raw_col_name: description_string } }
+    """
+    with open(doc_path, encoding="utf-8") as f:
+        content = f.read()
+
+    table_desc  = {}
+    column_desc = {}
+
+    # Internal doc structure:
+    # ## Section 2 — Table Overview
+    # ### TableName
+    # > Description paragraph
+    # | Column | Type | Notes |
+    # Each table block ends at the next ### heading
+
+    import re
+    # Match each table block
+    table_blocks = re.split(r"\n### ", content)
+    for block in table_blocks[1:]:  # skip preamble
+        lines = block.strip().split("\n")
+        raw_name = lines[0].strip()
+
+        # Extract description — first blockquote line after heading
+        desc_lines = [l.lstrip("> ").strip() for l in lines if l.startswith(">")]
+        table_desc[raw_name] = " ".join(desc_lines).strip()
+
+        # Extract column rows from the markdown table
+        col_dict = {}
+        in_table = False
+        for line in lines:
+            if line.startswith("| Column") or line.startswith("| column"):
+                in_table = True
+                continue
+            if in_table and line.startswith("|---"):
+                continue
+            if in_table and line.startswith("|"):
+                parts = [p.strip() for p in line.split("|")[1:-1]]
+                if len(parts) >= 3:
+                    col_name = parts[0]
+                    col_notes = parts[2]   # "Notes" column
+                    col_dict[col_name] = col_notes
+            elif in_table and not line.startswith("|"):
+                in_table = False
+
+        column_desc[raw_name] = col_dict
+
+    return table_desc, column_desc
+```
+
+### Mode 1 — Output Confirmation Before Generating
+
+After reading the files, print a confirmation to the user before writing any code:
+
+```
+✅ Dataset detected — here's what I found:
+
+  Industry   : [industry]
+  Company    : [company]
+  Tables     : [count] ([list of dim tables] | [list of fact tables])
+  Scenarios  : [scenario names from DimScenario]
+  Account Types : [list of AccountType values from DimAccount]
+
+  Documentation files:
+  ✅ Public guide found  → table + column descriptions will be embedded in BIM
+  ✅ Internal guide found → column notes will be used for BIM descriptions
+  [or ⚠️ No documentation files found → descriptions will use the skill's built-in catalogue]
+
+  Building model with:
+  Use Cases : [confirmed selections]
+  Persona   : [confirmed selection]
+
+  Proceed? (yes / adjust anything above)
+```
+
+Wait for confirmation before generating `build_model.py`.
+
+---
+
+## MODE 2 — Standalone (Upload PBIX + Description)
+
+### Trigger Condition
+The user uploads a `.pbix` file, a description markdown, or both.
+No dataset creator run exists in this conversation.
+
+### Accepted Upload Combinations
+
+| What the User Uploads | What the Skill Can Do |
+|----------------------|----------------------|
+| PBIX only | Extract table names from DiagramLayout; infer column names from Layout JSON; apply standard naming and measure catalogue; generate descriptions from skill's built-in catalogue |
+| PBIX + public doc | Table and column descriptions sourced from public doc; tables and columns from PBIX |
+| PBIX + internal doc | Richer column descriptions including Notes column; account structure read from internal doc |
+| PBIX + both docs | Full description coverage — preferred combination |
+| Description doc(s) only (no PBIX) | Build BIM skeleton from doc; user must supply column names via the docs since no PBIX to parse |
+
+If only a description doc is uploaded with no PBIX, ask:
+```
+I can see the description document but no PBIX file.
+Should I:
+A) Wait while you upload the PBIX file too?
+B) Build from the description document alone — I'll infer the schema from the table and column names listed in it?
+```
+
+### Mode 2 — Clarification Questions
+
+Ask all in one message:
+
+```
+I can see your uploaded file(s). Before I model them, a few quick questions:
+
+1. What industry is this dataset for? (e.g., B2B SaaS, Retail, Manufacturing, Healthcare)
+   This determines which industry-specific KPIs I add to the measure folder.
+
+2. Which reporting use cases should the DAX measures cover?
+   [ ] Variance Analysis      [ ] Period-over-Period    [ ] Rolling Averages
+   [ ] YTD / QTD / MTD        [ ] KPI & Ratio Analysis  [ ] Forecasting
+   [ ] Scenario Comparison    [ ] Ranking & Pareto       [ ] Dynamic Selection
+
+3. Who is the primary end user of the report?
+   A) CFO / CEO   B) FP&A Analyst   C) BI Developer
+   D) Sales Leader   E) Operations Manager   F) Investor / Board
+
+4. Should I use the standard [Dim] / [Fact] table naming convention,
+   or do the tables in your PBIX already have a naming style I should preserve?
+   A) Apply standard [Dim] / [Fact] convention
+   B) Preserve existing table names as-is
+   C) I'll tell you the convention I want
+```
+
+### Mode 2 — PBIX Parsing Sequence
+
+A PBIX file is a ZIP archive. Extract and parse these members:
+
+```python
+import zipfile, json, re
+from pathlib import Path
+
+def parse_pbix(pbix_path):
+    """
+    Extracts schema information from a PBIX file.
+    Returns: tables (list of display names), relationships (list of dicts)
+    """
+    result = {"tables": [], "report_pages": [], "visuals": []}
+
+    with zipfile.ZipFile(pbix_path, "r") as z:
+        members = z.namelist()
+
+        # ── Step 1: DiagramLayout — table names and positions ──────────────
+        if "DiagramLayout" in members:
+            raw = z.read("DiagramLayout")
+            try:
+                layout = json.loads(raw.decode("utf-16-le"))
+            except Exception:
+                layout = json.loads(raw.decode("utf-8"))
+
+            diagrams = layout.get("diagrams", [])
+            if diagrams:
+                nodes = diagrams[0].get("nodes", [])
+                result["tables"] = [n["nodeIndex"] for n in nodes]
+                # nodeIndex is already the display name — e.g. "[Dim] Date", "[Fact] Financial"
+
+        # ── Step 2: Report/Layout — page names and visual types ────────────
+        if "Report/Layout" in members:
+            raw = z.read("Report/Layout")
+            try:
+                rpt = json.loads(raw.decode("utf-16-le"))
+            except Exception:
+                rpt = json.loads(raw.decode("utf-8"))
+
+            sections = rpt.get("sections", [])
+            for s in sections:
+                page_name = s.get("displayName", "")
+                visuals = []
+                for v in s.get("visualContainers", []):
+                    cfg = json.loads(v.get("config", "{}"))
+                    vtype = cfg.get("singleVisual", {}).get("visualType", "")
+                    visuals.append(vtype)
+                result["report_pages"].append({
+                    "name": page_name,
+                    "visual_types": visuals
+                })
+
+    return result
+```
+
+#### What to Extract from the PBIX
+
+| PBIX Member | Information Extracted | How Used |
+|------------|----------------------|---------|
+| `DiagramLayout` | Table display names as already set by the user (e.g. `[Dim] Date`) | Skips renaming if names already follow convention; maps to raw CSV names for relationship building |
+| `Report/Layout` | Page names, visual types (Inforiver, native, etc.) | Documents what report pages exist; detects if Inforiver Premium visuals are used |
+| `DataModel` | Cannot be parsed — XPress9 compressed proprietary format | **Do not attempt to read DataModel** — use DiagramLayout and description docs instead |
+| `[Content_Types].xml` | Confirms file is a valid PBIX | Validation only |
+| `Connections` | Remote dataset ID if PBIX is connected to a published dataset | Detect live connection vs embedded model |
+
+#### Detecting Table Name Convention from DiagramLayout
+
+```python
+def detect_naming_convention(table_names):
+    """
+    Detect whether table names already follow a convention.
+    Returns: "dim_fact_prefix" | "raw" | "custom" | "mixed"
+    """
+    has_dim_prefix  = any(n.startswith("[Dim]") for n in table_names)
+    has_fact_prefix = any(n.startswith("[Fact]") for n in table_names)
+    has_raw_dim     = any(n.startswith("Dim") and not n.startswith("[Dim]") for n in table_names)
+    has_raw_fact    = any(n.startswith("Fact") and not n.startswith("[Fact]") for n in table_names)
+
+    if has_dim_prefix and has_fact_prefix:
+        return "dim_fact_prefix"   # already uses the standard — preserve as-is
+    elif has_raw_dim and has_raw_fact:
+        return "raw"               # CamelCase raw names — apply standard renaming
+    else:
+        return "custom"            # user-defined names — ask before renaming
+```
+
+If `detect_naming_convention` returns `"dim_fact_prefix"`, skip the rename step —
+the user has already applied the convention. Build the BIM using the existing names directly.
+
+If it returns `"raw"`, apply the standard TABLE_NAME_MAP from the Table Naming Convention section.
+
+If it returns `"custom"`, present the detected table names and ask:
+```
+I found these table names in your PBIX:
+  [list of names]
+
+Should I:
+A) Keep these names as-is in the BIM
+B) Apply the standard [Dim] / [Fact] renaming
+C) Let me tell you the mapping manually
+```
+
+### Mode 2 — Description File Parsing
+
+The description files are the public and/or internal documentation markdowns produced by
+the enterprise-planning-dataset-creator skill, or any equivalent structured markdown
+the user provides.
+
+```python
+def parse_description_doc(doc_path):
+    """
+    Parse a description markdown file to extract table and column descriptions.
+    Works for both the public doc and internal doc formats from the dataset creator.
+    Also works for any markdown with the pattern:
+      ### TableName
+      > Description text
+      | Column | ... | Description/Notes |
+    """
+    with open(doc_path, encoding="utf-8") as f:
+        content = f.read()
+
+    table_descriptions  = {}
+    column_descriptions = {}
+
+    # Split into blocks by ### heading
+    blocks = re.split(r"\n(?=### )", content)
+    for block in blocks:
+        lines = block.strip().split("\n")
+        if not lines[0].startswith("###"):
+            continue
+
+        table_name = lines[0].lstrip("# ").strip()
+
+        # Extract blockquote description
+        desc_parts = []
+        for line in lines[1:]:
+            if line.startswith(">"):
+                desc_parts.append(line.lstrip("> ").strip())
+            elif desc_parts:
+                break   # stop at first non-blockquote after desc started
+        table_descriptions[table_name] = " ".join(desc_parts)
+
+        # Extract column rows from markdown table
+        col_dict = {}
+        header_found = False
+        for line in lines:
+            if "|" not in line:
+                continue
+            cols = [c.strip() for c in line.split("|")[1:-1]]
+            if not header_found:
+                # Detect header row by looking for "Column" or "Name" in first cell
+                if cols and cols[0].lower() in ("column", "name", "display name"):
+                    # Find which column index holds the description/notes
+                    desc_idx = next(
+                        (i for i, h in enumerate(cols)
+                         if h.lower() in ("description", "notes", "note")),
+                        len(cols) - 1  # default: last column
+                    )
+                    header_found = True
+                continue
+            if "|---" in line:
+                continue
+            if header_found and cols:
+                col_name = cols[0]
+                desc = cols[desc_idx] if desc_idx < len(cols) else ""
+                if col_name and not col_name.startswith("---"):
+                    col_dict[col_name] = desc
+
+        column_descriptions[table_name] = col_dict
+
+    return table_descriptions, column_descriptions
+```
+
+#### Description Resolution Priority (Mode 2)
+
+When both a PBIX and documentation files are available, descriptions are resolved
+in this priority order — highest wins:
+
+```
+Priority 1 — Internal doc (most detailed, has Notes column from dataset creator)
+Priority 2 — Public doc (plain English, slightly less technical)
+Priority 3 — Skill's built-in Description Catalogue (from the Table & Column Description section)
+Priority 4 — Auto-generated from column name (split camelCase, add generic suffix)
+```
+
+```python
+def resolve_description(raw_col_name, raw_table_name,
+                         internal_col_descs, public_col_descs, builtin_descs):
+    """Returns the best available description for a column."""
+    # Priority 1 — internal doc
+    if raw_table_name in internal_col_descs:
+        desc = internal_col_descs[raw_table_name].get(raw_col_name, "")
+        if desc:
+            return desc
+    # Priority 2 — public doc
+    if raw_table_name in public_col_descs:
+        desc = public_col_descs[raw_table_name].get(raw_col_name, "")
+        if desc:
+            return desc
+    # Priority 3 — built-in catalogue
+    key = (raw_table_name, raw_col_name)
+    if key in builtin_descs:
+        return builtin_descs[key]
+    # Priority 4 — auto-generate from name
+    return auto_describe(raw_col_name)
+
+def auto_describe(col_name):
+    """Generates a minimal description by splitting camelCase."""
+    import re
+    words = re.sub(r"([A-Z])", r" \1", col_name).strip().split()
+    return " ".join(words).capitalize() + "."
+```
+
+### Mode 2 — Schema Inference When No Column Names Are Available
+
+If only a PBIX is uploaded with no description files, and the DataModel cannot be read
+(it is always XPress9 compressed and unreadable), use this fallback sequence:
+
+1. **From DiagramLayout** — get table display names and visible column count per table
+   (the `size.height` of each node approximates the number of visible columns)
+2. **From Report/Layout** — scan `queryRef` fields inside visual configurations to
+   discover which column names are used in report visuals
+3. **Ask the user** to export a CSV from each table in Power BI Desktop (right-click
+   table → Export data) and upload those CSVs alongside the PBIX
+
+```
+I can see [N] tables in your PBIX from the diagram layout, but I cannot read the
+column names directly from the PBIX file format.
+
+The quickest way forward:
+Option A — Upload the CSV files for each table (right-click each table in Power BI
+           Desktop → Export data → export as CSV). I'll read headers from those.
+Option B — Tell me the industry and I'll use the standard schema for that industry
+           and match table names to the expected column list automatically.
+```
+
+### Mode 2 — Output Confirmation Before Generating
+
+```
+✅ Files parsed — here's what I found:
+
+  Tables in PBIX       : [list of table names]
+  Naming convention    : [detected convention]
+  Description source   : [Internal doc / Public doc / Built-in catalogue / Auto-generated]
+  Industry (confirmed) : [industry]
+
+  Column coverage:
+  ✅ [table] — [N] columns described
+  ⚠️  [table] — no description file match; using built-in catalogue
+  ⚠️  [table] — [N] columns will be auto-described from column name
+
+  Building model with:
+  Use Cases : [confirmed selections]
+  Persona   : [confirmed selection]
+
+  Proceed? (yes / adjust anything above)
+```
+
+---
+
+## Shared Logic (Both Modes)
+
+The following sections apply identically regardless of which mode was used to gather the schema.
+Once the input phase is complete and the user confirms the summary above, proceed with:
+
+1. Table Naming Convention (apply if mode 2 and raw names detected)
+2. Column Naming Rules
+3. Relationship Map (build only for tables present in the input)
+4. DAX Measure Architecture (folders, catalogue, industry block)
+5. BIM File Structure
+6. Python Script Template
+7. Measures Reference Markdown
+8. Final Print Summary
+
+The distinction ends once the schema is known. From that point forward, the generation
+logic, BIM structure, measure catalogue, description application, and output format
+are identical for both modes.
+
+---
+
+## Clarification Rule (Shared — Applies After Mode Is Confirmed)
+
+**Ask all mode-specific questions in a single grouped message.**
+Never ask more than one message of questions. Never ask mode questions before detecting the mode.
+Once both the mode and its questions are answered, proceed directly to output generation — no further check-ins.
+
+### Use Case Checklist (referenced by both modes)
+
+```
+[ ] Variance Analysis        — Actual vs Plan vs Forecast with % deviation
+[ ] Period-over-Period       — MoM, QoQ, YoY comparisons
+[ ] Rolling Averages         — 3M, 6M, 12M rolling calculations
+[ ] YTD / QTD / MTD          — Cumulative period aggregations
+[ ] KPI & Ratio Analysis     — Gross Margin %, EBITDA %, DSO, Inventory Turns etc.
+[ ] Forecasting              — Remaining forecast, full-year estimate (FYE), run-rate
+[ ] Scenario Comparison      — Side-by-side Plan vs Forecast vs Revised Forecast
+[ ] Ranking & Pareto         — Top N products / regions / accounts by value
+[ ] Dynamic Selection        — Slicer-driven metric switching
+```
+
+### End User Persona Table (referenced by both modes)
+
+| Persona | Focus | Naming Preference |
+|---------|-------|-------------------|
+| CFO / CEO | High-level P&L, EBITDA, Variance summary | Concise business labels |
+| FP&A Analyst | Full variance stack, scenario comparison, rolling | Descriptive with period labels |
+| BI Developer / Data Engineer | Model stress-testing, all grain measures | Technical, explicit |
+| Sales Leader | Revenue, pipeline, ASP, win rate | Commercial language |
+| Operations Manager | Throughput, cost per unit, utilisation | Operational metrics |
+| Investor / Board | EBITDA, ROIC, FCF, cash metrics | Finance-standard labels |
+
+### Table Naming Confirmation (Mode 2 only)
+
+Default prefix convention:
+- Dimension tables: `[Dim] TableName`
+- Fact tables: `[Fact] TableName`
+- Measure table: `Measure` (no prefix, no brackets)
+
+---
+
+## Table Naming Convention
+
+Use the following prefix standard, matching the sample PBIX pattern:
+
+| Raw CSV Name | Renamed Table Name (Power BI) |
+|-------------|-------------------------------|
+| DimDate | [Dim] Date |
+| DimGeography | [Dim] Geography |
+| DimProduct | [Dim] Product |
+| DimAccount | [Dim] Account |
+| DimBusinessUnit | [Dim] Business Unit |
+| DimDepartment | [Dim] Department |
+| DimScenario | [Dim] Scenario |
+| DimEmployee | [Dim] Employee |
+| DimCustomer | [Dim] Customer |
+| DimSupplier | [Dim] Supplier |
+| DimAsset | [Dim] Asset |
+| DimMacroEvent | [Dim] Macro Event |
+| DimCustomerSegment | [Dim] Customer Segment |
+| FactFinancial | [Fact] Financial |
+| FactSalesOrder / FactInvoiceLine | [Fact] Invoice Line |
+| FactPurchaseOrder | [Fact] Purchase Order |
+| FactPayroll | [Fact] Payroll |
+| FactOperational | [Fact] Operational |
+| FactExpenseClaim | [Fact] Expense Claim |
+| FactAssetMaintenance | [Fact] Asset Maintenance |
+| FactDepreciation | [Fact] Depreciation |
+| FactUtility | [Fact] Utility |
+| FactTax | [Fact] Tax |
+| FactCapEx | [Fact] CapEx |
+| FactJournalEntry | [Fact] Journal Entry |
+| FactPlan | [Fact] Plan |
+| FactMacroEventImpact | [Fact] Macro Event Impact |
+
+A standalone `Measure` table (no rows, no columns) holds all measures. This keeps the
+field list clean and separates business logic from raw data.
+
+---
+
+## Column Naming Rules
+
+Strip technical suffixes and make names report-ready.
+
+| Pattern to Remove/Replace | Rule |
+|--------------------------|------|
+| `Key` suffix on FK columns | Remove — e.g. `ProductKey` → `Product Key` (keep space, helps readability in joins) |
+| `Key` suffix on PK in dim tables | Rename to `[TableName] Key` for clarity |
+| `IsLeafNode` | Rename to `Is Leaf` |
+| `HierarchyPath` | Rename to `Hierarchy Path` |
+| `HierarchyLevel` | Rename to `Hierarchy Level` |
+| `ParentXxxKey` | Keep as-is — needed for PATH() functions |
+| Camel case columns | Add spaces: `AccountCode` → `Account Code`, `NetAmount` → `Net Amount` |
+| `TotalEmployerCost` | → `Total Employer Cost` |
+| `ReportingAmount` | → `Reporting Amount` |
+| `SignConvention` | → `Sign Convention` |
+| `IsRecurring` | → `Is Recurring` |
+| `ApprovalStatus` | → `Approval Status` |
+| Dates: `Date`, `OrderDate`, `InvoiceDate` | Keep short — `Date`, `Order Date`, `Invoice Date` |
+
+**Column visibility rules:**
+- All FK columns (ending in `Key`): set `isHidden: true` in BIM — they exist for relationships but don't clutter the field list
+- Technical columns (`HierarchyPath`, `IsLeafNode`, `SignConvention`): set `isHidden: true`
+- Surrogate keys (PK in dim tables): set `isHidden: true`
+- Keep visible: all descriptive/label columns, date columns, amount columns
+
+---
+
+## Relationship Map
+
+Build relationships based on the FK columns generated by enterprise-planning-dataset-creator.
+All relationships are Many-to-One (fact → dimension), active unless noted.
+
+### Universal Relationships (all industries)
+
+```python
+UNIVERSAL_RELATIONSHIPS = [
+    # [Fact] Financial
+    {"from_table": "[Fact] Financial", "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Account Key",      "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Scenario Key",     "to_table": "[Dim] Scenario",      "to_col": "Scenario Key",      "active": True},
+    {"from_table": "[Fact] Financial", "from_col": "Department Key",   "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
+
+    # [Fact] Plan
+    {"from_table": "[Fact] Plan",      "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Account Key",      "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Plan",      "from_col": "Scenario Key",     "to_table": "[Dim] Scenario",      "to_col": "Scenario Key",      "active": True},
+
+    # [Fact] Invoice Line
+    {"from_table": "[Fact] Invoice Line","from_col": "Date Key",       "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Product Key",    "to_table": "[Dim] Product",       "to_col": "Product Key",       "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Customer Key",   "to_table": "[Dim] Customer",      "to_col": "Customer Key",      "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Geography Key",  "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Invoice Line","from_col": "Business Unit Key","to_table":"[Dim] Business Unit","to_col": "Business Unit Key", "active": True},
+
+    # [Fact] Operational (industry-specific — generate only if table exists)
+    {"from_table": "[Fact] Operational","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Product Key",     "to_table": "[Dim] Product",       "to_col": "Product Key",       "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Geography Key",   "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+    {"from_table": "[Fact] Operational","from_col": "Business Unit Key","to_table":"[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+
+    # [Fact] Payroll
+    {"from_table": "[Fact] Payroll",   "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Employee Key",     "to_table": "[Dim] Employee",      "to_col": "Employee Key",      "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Department Key",   "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
+    {"from_table": "[Fact] Payroll",   "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+
+    # [Fact] Expense Claim
+    {"from_table": "[Fact] Expense Claim","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "Employee Key",    "to_table": "[Dim] Employee",      "to_col": "Employee Key",      "active": True},
+    {"from_table": "[Fact] Expense Claim","from_col": "Department Key",  "to_table": "[Dim] Department",    "to_col": "Department Key",    "active": True},
+
+    # [Fact] Depreciation
+    {"from_table": "[Fact] Depreciation","from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Depreciation","from_col": "Asset Key",        "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
+
+    # [Fact] Asset Maintenance
+    {"from_table": "[Fact] Asset Maintenance","from_col": "Date Key",    "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Asset Maintenance","from_col": "Asset Key",   "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
+
+    # [Fact] Tax
+    {"from_table": "[Fact] Tax",       "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Tax",       "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+
+    # [Fact] Utility
+    {"from_table": "[Fact] Utility",   "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Utility",   "from_col": "Geography Key",    "to_table": "[Dim] Geography",     "to_col": "Geography Key",     "active": True},
+
+    # [Fact] Journal Entry
+    {"from_table": "[Fact] Journal Entry","from_col": "Date Key",        "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "Account Key",     "to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+    {"from_table": "[Fact] Journal Entry","from_col": "Business Unit Key","to_table":"[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+
+    # [Fact] CapEx (capital-intensive industries only)
+    {"from_table": "[Fact] CapEx",     "from_col": "Date Key",         "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "Asset Key",        "to_table": "[Dim] Asset",         "to_col": "Asset Key",         "active": True},
+    {"from_table": "[Fact] CapEx",     "from_col": "Business Unit Key","to_table": "[Dim] Business Unit", "to_col": "Business Unit Key", "active": True},
+
+    # [Fact] Macro Event Impact
+    {"from_table": "[Fact] Macro Event Impact","from_col": "Date Key",   "to_table": "[Dim] Date",          "to_col": "Date",          "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "Event Key","to_table":"[Dim] Macro Event","to_col": "Event Key",   "active": True},
+    {"from_table": "[Fact] Macro Event Impact","from_col": "Account Key","to_table": "[Dim] Account",       "to_col": "Account Key",       "active": True},
+]
+```
+
+**Rule:** Only create a relationship if BOTH tables exist in the CSV set.
+Skip silently if either table is absent — never raise an error for missing optional tables.
+
+---
+
+## DAX Measure Architecture
+
+### Core Design Principle
+
+**Measures are not a fixed template — they are designed fresh for every industry.**
+
+The folder structure, folder names, measure names, and measure formulas are all derived
+from the specific industry, its P&L structure, its operational vocabulary, and the use cases
+selected during intake. A SaaS company does not get a "Cost & Expense" folder — it gets
+"Unit Economics" and "Subscription Health." A hospital does not get "Revenue & Sales" —
+it gets "Clinical Revenue" and "Patient Throughput."
+
+**There are only two fixed elements across all industries:**
+- `00 | Base Measures` — always first; contains the raw Actual/Plan/Forecast aggregations
+  that all other measures build on
+- `[Last] | Navigation & Labels` — always last; contains display text, timestamps, and
+  context labels used by card visuals and report headers
+
+Everything between these two is designed for the industry.
+
+---
+
+### Measure Design Phase — Always Run Before Writing Any DAX
+
+Before writing a single measure, complete this four-step design phase:
+
+**Step 1 — Extract the industry's P&L vocabulary**
+
+In Mode 1: read `DimAccount.csv` and collect:
+- All distinct `AccountType` values (e.g. for SaaS: Revenue, COGS, OpEx, Tax)
+- All Level 1 account names (e.g. for Healthcare: Inpatient Revenue, Outpatient Revenue, Direct Care Costs, Facility Costs)
+- All `ScenarioName` values from `DimScenario.csv`
+
+In Mode 2: extract the same from the description doc, or ask the user if not available.
+
+Never assume generic values like `"Revenue"` or `"COGS"` — use what is actually in the data.
+
+**Step 2 — Extract the industry's operational vocabulary**
+
+If `[Fact] Operational` exists, read its column headers. These tell you what metrics the
+industry tracks operationally and what KPI measures are possible.
+
+For example:
+- Retail operational columns → Units Sold, Units On Hand, Store Area Sqft, Invoice Number
+- Manufacturing → Units Produced, Good Units, Defective Units, Theoretical Max Units, Installed Capacity
+- Healthcare → Patient Visits, Patient Bed Days, Available Bed Days, Discharges, Consultation Slots
+- Hospitality → Occupied Room Nights, Available Room Nights, Room Revenue
+
+These column names go directly into Folder-specific measures. Never hardcode assumed column names.
+
+**Step 3 — Design the folder structure**
+
+Based on industry + selected use cases, design 6–10 folders with names that match how
+a professional in that industry would label their reporting areas. Use the numeric prefix
+`00`, `01`, `02`… for ordering — but the name after the pipe is fully industry-driven.
+
+**Step 4 — Design the measures within each folder**
+
+For every folder, design 4–8 measures that are genuinely useful for that folder's purpose.
+Every measure must answer a specific business question a person in the selected persona
+would actually ask. Never add a measure just to fill a folder.
+
+---
+
+### Folder Naming — Industry Examples
+
+The examples below show how folder names should differ by industry.
+These are reference patterns only — the actual folder names are designed from the specific
+industry's P&L structure and operational context discovered in Step 1 and Step 2.
+
+**B2B SaaS**
+```
+00 | Base Measures
+01 | Subscription Revenue
+02 | Customer Health
+03 | Growth & Retention
+04 | Unit Economics
+05 | Variance vs Plan
+06 | Period Trends
+07 | Forecasting
+08 | Scenario Comparison
+09 | Navigation & Labels
+```
+
+**Retail (Fashion / Grocery / Multi-category)**
+```
+00 | Base Measures
+01 | Sales Performance
+02 | Category & Margin
+03 | Store Productivity
+04 | Inventory & Sell-Through
+05 | Discount & Pricing
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Ranking & Pareto
+09 | Navigation & Labels
+```
+
+**Manufacturing (Automotive / FMCG / Industrial)**
+```
+00 | Base Measures
+01 | Production Output
+02 | Quality & Yield
+03 | Plant Efficiency
+04 | Cost per Unit
+05 | Supply Chain
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Forecasting
+09 | Navigation & Labels
+```
+
+**Healthcare (Hospital / Clinic / Diagnostics)**
+```
+00 | Base Measures
+01 | Clinical Revenue
+02 | Patient Throughput
+03 | Capacity & Utilisation
+04 | Cost per Care Episode
+05 | Workforce & Staffing
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Forecasting
+09 | Navigation & Labels
+```
+
+**Financial Services (Bank / NBFC / Insurance)**
+```
+00 | Base Measures
+01 | Interest Income & NIM
+02 | Fee & Non-Interest Income
+03 | Loan Portfolio
+04 | Credit Quality
+05 | Operating Efficiency
+06 | Provisions & Risk
+07 | Variance vs Plan
+08 | Period Trends & YTD
+09 | Navigation & Labels
+```
+
+**Hospitality (Hotels / Resorts / Serviced Apartments)**
+```
+00 | Base Measures
+01 | Room Revenue & Rate
+02 | Occupancy & Availability
+03 | F&B Performance
+04 | Property Operating Profit
+05 | GOP & GOPPAR
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Forecasting
+09 | Navigation & Labels
+```
+
+**Logistics / Supply Chain**
+```
+00 | Base Measures
+01 | Revenue & Freight
+02 | Delivery Performance
+03 | Network Cost
+04 | Capacity Utilisation
+05 | Fleet & Warehouse
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Ranking & Pareto
+09 | Navigation & Labels
+```
+
+**Construction / EPC**
+```
+00 | Base Measures
+01 | Contract Revenue
+02 | Project Cost
+03 | Margin & Contribution
+04 | CapEx & Asset Investment
+05 | Project Progress
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Forecasting
+09 | Navigation & Labels
+```
+
+**Oil & Gas (Upstream / Downstream)**
+```
+00 | Base Measures
+01 | Production Revenue
+02 | Lifting & Production Costs
+03 | DD&A & Finding Costs
+04 | CapEx & Reserve Investment
+05 | Cost per Barrel (BOE)
+06 | Variance vs Plan
+07 | Period Trends & YTD
+08 | Forecasting
+09 | Navigation & Labels
+```
+
+---
+
+### Measure Design Rules (Apply to All Industries)
+
+1. **No reconciliation measures.** Never create any measure that checks row counts,
+   table totals against each other, or source-vs-fact agreement.
+2. **No technical or debug measures.** No `COUNTROWS()` sanity checks, no `BLANK()` sentinels,
+   no measures prefixed `_Test`, `_Check`, or `_Debug`.
+3. **Name measures in the industry's language.** A SaaS analyst says "MRR" not "Monthly Revenue."
+   A hotel operator says "RevPAR" not "Revenue Per Room." A banker says "NIM" not "Net Interest Margin %."
+   Use the vocabulary the selected persona uses in their daily work.
+4. **Every measure must answer a specific business question.** Before writing the DAX,
+   write the question. If you cannot write the question, the measure is not needed.
+5. **Every measure must have `formatString` set.** Never leave format unset.
+6. **Every measure must have `description` set.** Use the description rules from the
+   Measure Description Catalogue section.
+7. **CALCULATE with KEEPFILTERS** whenever filtering on Scenario Name — prevents
+   cross-filter bleed from scenario slicers.
+8. **Use DIVIDE() for all division** — never use the `/` operator directly.
+9. **Use VAR / RETURN** for any measure with more than two computation steps.
+10. **Reference ScenarioName strings dynamically** — read actual values from DimScenario,
+    never hardcode `"Actual"` or `"Plan"`. Store them as Python constants at the top of
+    `build_model.py` and inject them into every CALCULATE filter at generation time.
+11. **Reference AccountType values dynamically** — read actual values from DimAccount,
+    never hardcode `"Revenue"` or `"COGS"`. Match by account type semantics, not string equality.
+12. **Reference operational column names dynamically** — read from the [Fact] Operational
+    header and match to KPI patterns, never hardcode column names in the skill's catalogue.
+
+---
+
+### 00 | Base Measures — Universal (All Industries)
+
+These four measures exist in every model regardless of industry. They are the only truly
+universal measures. Everything else is built on top of these and is industry-specific.
+
+All four reference the actual scenario names read from DimScenario — injected at build time.
+
+```dax
+-- Actual Amount
+-- Base aggregation. ScenarioName injected from DimScenario at build time.
+Actual Amount =
+CALCULATE(
+    SUM( '[Fact] Financial'[Amount] ),
+    KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = "{ACTUAL_SCENARIO}" )
+)
+
+-- Plan Amount
+Plan Amount =
+CALCULATE(
+    SUM( '[Fact] Plan'[Amount] ),
+    KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = "{PLAN_SCENARIO}" )
+)
+
+-- Forecast Amount
+Forecast Amount =
+CALCULATE(
+    SUM( '[Fact] Plan'[Amount] ),
+    KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = "{FORECAST_SCENARIO}" )
+)
+
+-- Revised Forecast Amount
+Revised Forecast Amount =
+CALCULATE(
+    SUM( '[Fact] Plan'[Amount] ),
+    KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = "{REVISED_FORECAST_SCENARIO}" )
+)
+```
+
+`{ACTUAL_SCENARIO}`, `{PLAN_SCENARIO}` etc. are Python template variables — not literal strings.
+The Python script replaces them with the actual values from `DimScenario.csv` before writing
+the measure expression to the BIM file.
+
+---
+
+### [Last] | Navigation & Labels — Universal (All Industries)
+
+These measures are the same across all industries. They support card visuals, page headers,
+and report context labels. The folder name is always the last numbered folder.
+
+```dax
+Report Refreshed =
+"Data as at: " & FORMAT( NOW(), "DD MMM YYYY HH:MM" )
+
+Selected Period =
+IF( HASONEVALUE( '[Dim] Date'[Year Month Label] ),
+    SELECTEDVALUE( '[Dim] Date'[Year Month Label] ), "Multiple Periods" )
+
+Selected Scenario =
+IF( HASONEVALUE( '[Dim] Scenario'[Scenario Name] ),
+    SELECTEDVALUE( '[Dim] Scenario'[Scenario Name] ), "All Scenarios" )
+
+Selected Geography =
+IF( HASONEVALUE( '[Dim] Geography'[Country] ),
+    SELECTEDVALUE( '[Dim] Geography'[Country] ), "All Geographies" )
+
+Latest Data Month =
+FORMAT( CALCULATE( MAX( '[Fact] Financial'[Date] ),
+    KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = "{ACTUAL_SCENARIO}" ) ), "MMM YYYY" )
+
+No Data Message =
+IF( ISBLANK( [Actual Amount] ), "No data available for this selection", BLANK() )
+```
+
+---
+
+### Industry-Specific Folder Design — Patterns by Industry
+
+The following are **design patterns**, not fixed catalogues. For each industry, the patterns
+show what kinds of measures belong in which folder — the actual measure names, formulas,
+and column references are generated from the specific data discovered in the Design Phase.
+
+Each pattern entry shows:
+- **Folder purpose** — what business area it covers
+- **Measure types** — categories of measures to include
+- **Key question each measure answers** — the business question that justifies the measure
+- **Data source** — which table and column type the measure reads from
+
+The Python script generates actual DAX by combining these patterns with the specific
+column names and account types discovered from the input files.
+
+---
+
+#### B2B SaaS / Technology
+
+**01 | Subscription Revenue**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| MRR | How much recurring revenue did we recognise this month? | [Fact] Invoice Line — subscription revenue type filter |
+| ARR | What is our annualised recurring revenue run rate? | MRR × 12 |
+| New MRR | How much MRR came from new customers this month? | [Fact] Invoice Line — new customer flag |
+| Expansion MRR | How much did existing customers spend beyond their base contract? | [Fact] Invoice Line — upsell/expansion revenue type |
+| Churned MRR | How much MRR was lost to cancellations this month? | [Fact] Invoice Line — churn flag |
+| MRR Growth % | How fast is recurring revenue growing month over month? | MoM calculation on MRR |
+
+**02 | Customer Health**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Active Customers | How many paying customers do we have right now? | [Fact] Invoice Line — distinct customer count |
+| Customer Churn Rate % | What percentage of customers cancelled this month? | [Fact] Invoice Line — churn vs prior period |
+| Net Revenue Retention % | Are we growing revenue within our existing customer base? | Current MRR ÷ prior period MRR for same cohort |
+| Gross Revenue Retention % | Ignoring expansion, how much MRR did we retain? | Retained MRR ÷ prior period MRR |
+| Customers at Risk | How many accounts are flagged as At Risk? | [Dim] Customer — status filter |
+
+**03 | Growth & Retention**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| New Customers | How many new customers signed up this period? | [Fact] Invoice Line — new customer flag |
+| Churned Customers | How many customers cancelled? | [Fact] Invoice Line — churn flag |
+| Net New Customers | Net change in customer count | New minus churned |
+| YoY MRR Growth % | How much has recurring revenue grown versus last year? | MRR vs prior year MRR |
+| Customer Lifetime Value (CLV) | How much is an average customer worth over their lifetime? | ARPU ÷ Churn Rate |
+
+**04 | Unit Economics**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| ARPU | How much does each customer pay on average per month? | MRR ÷ Active Customers |
+| CAC | How much does it cost to acquire one new customer? | Sales & Marketing spend ÷ New Customers |
+| LTV / CAC Ratio | Is customer acquisition economically viable? | CLV ÷ CAC |
+| Payback Period (Months) | How many months to recover the cost of acquiring a customer? | CAC ÷ (ARPU × Gross Margin %) |
+| Revenue per Employee | How much revenue does each employee generate? | MRR ÷ headcount |
+
+---
+
+#### Retail (Grocery / Fashion / Multi-category / E-commerce)
+
+**01 | Sales Performance**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Net Sales | What is our total net revenue after discounts? | [Fact] Invoice Line — Net Amount |
+| Gross Sales | What is our total sales before any deductions? | [Fact] Invoice Line — Gross Amount |
+| Same-Store Sales Growth % | Are established stores growing? | Net Sales YoY for stores open in both years |
+| Transactions | How many customer transactions did we process? | [Fact] Invoice Line — distinct Invoice Number |
+| Basket Size | How much does the average customer spend per visit? | Net Sales ÷ Transactions |
+| Items per Basket | How many products does the average customer buy? | Units Sold ÷ Transactions |
+
+**02 | Category & Margin**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Gross Margin % | How much of every sales pound is retained after product cost? | Gross Profit ÷ Net Sales |
+| Contribution by Category | Which categories contribute most to gross profit? | By [Dim] Product Category |
+| Trade Spend | How much was spent on promotions and trade discounts? | [Fact] Invoice Line — Discount Amount |
+| Promotional Uplift % | Did promotions drive incremental volume? | Sales in promotional periods vs baseline |
+| Mix Shift Impact | How much did category mix change vs prior year? | Revenue Mix % change YoY |
+
+**03 | Store Productivity**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Revenue per Square Foot | How productive is each square foot of floor space? | Net Sales ÷ Store Area |
+| Revenue per Store | What is the average revenue per store? | Net Sales ÷ store count |
+| Store Rank by Revenue | Which stores are our top performers? | RANKX on Net Sales per store |
+| New vs Existing Store Split | How much revenue comes from new vs established stores? | By store opening date |
+
+**04 | Inventory & Sell-Through**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Inventory Turnover | How efficiently are we turning stock into sales? | COGS ÷ average inventory value |
+| Sell-Through Rate % | What proportion of available stock did we sell? | Units Sold ÷ (Units Sold + Units On Hand) |
+| Days of Inventory | How many days of stock do we have left at current sell rate? | Inventory ÷ daily sales rate |
+| Shrinkage % | How much stock was lost to theft, damage, or error? | Shrinkage ÷ Opening Stock |
+
+**05 | Discount & Pricing**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Average Selling Price | What price are we effectively achieving per unit? | Net Sales ÷ Units Sold |
+| Discount Rate % | What percentage of gross sales are we discounting away? | Discount Amount ÷ Gross Sales |
+| Discount by Category | Which categories carry the highest discount burden? | By [Dim] Product Category |
+| Price Realisation % | Are we achieving our intended price points? | Actual ASP ÷ List Price |
+
+---
+
+#### Manufacturing (Automotive / FMCG / Industrial Equipment / Process)
+
+**01 | Production Output**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Units Produced | How many units came off the production line? | [Fact] Operational — Units Produced |
+| Good Units | How many units passed quality inspection? | [Fact] Operational — Good Units |
+| Production vs Capacity | What percentage of capacity are we running at? | Units Produced ÷ Installed Capacity |
+| Production by Shift | Which shifts are most productive? | By shift dimension |
+| Daily Production Rate | How many units per day are we averaging? | Total Units ÷ production days |
+
+**02 | Quality & Yield**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| OEE % | How efficiently are we using our equipment overall? | Good Units ÷ Theoretical Max Units |
+| Defect Rate % | What proportion of output is defective? | Defective Units ÷ Total Units Produced |
+| First Pass Yield % | What proportion passes quality on the first attempt? | Good Units ÷ Total Produced (no rework) |
+| Scrap Cost | What is the financial cost of defective output? | Defective Units × Standard Cost |
+| Rework Rate % | How much output needed to be reworked before passing? | Rework Units ÷ Total Produced |
+
+**03 | Plant Efficiency**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Capacity Utilisation % | What proportion of installed capacity is being used? | Actual ÷ Installed Capacity |
+| Planned vs Unplanned Downtime | How much production time was lost, and why? | [Fact] Asset Maintenance — downtime hours |
+| Machine Availability % | What proportion of scheduled time was equipment available? | Available Hours ÷ Scheduled Hours |
+| Throughput Rate | How many units per hour is the plant producing? | Units ÷ Operating Hours |
+
+**04 | Cost per Unit**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Cost per Unit Produced | What does it cost to make one unit? | COGS ÷ Units Produced |
+| Direct Material Cost per Unit | What is the raw material cost per unit? | Material COGS ÷ Units |
+| Direct Labour Cost per Unit | What is the labour cost per unit? | Labour COGS ÷ Units |
+| Manufacturing Overhead per Unit | What overhead is absorbed per unit? | Overhead ÷ Units |
+| Cost vs Standard % | How does actual cost compare to standard cost? | Actual Cost per Unit ÷ Standard Cost |
+
+**05 | Supply Chain**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Purchase Spend | How much did we spend on materials and supplies? | [Fact] Purchase Order — Total Cost |
+| On-Time Delivery from Suppliers | Are suppliers delivering on time? | [Fact] Purchase Order — GRN Status |
+| Average Lead Time (Days) | How long does it take from order to receipt? | Delivery Date − Order Date average |
+| Supplier Concentration % | How dependent are we on our top suppliers? | Top supplier spend ÷ total spend |
+
+---
+
+#### Healthcare (Hospital / Clinic / Diagnostics)
+
+**01 | Clinical Revenue**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Inpatient Revenue | How much revenue came from admitted patients? | [Fact] Financial — Inpatient Revenue account |
+| Outpatient Revenue | How much revenue came from walk-in and day-case patients? | [Fact] Financial — Outpatient Revenue account |
+| Pharmacy & Diagnostics Revenue | How much did pharmacy and diagnostic services contribute? | [Fact] Financial — relevant account |
+| Revenue by Service Line | Which clinical departments generate the most revenue? | By [Dim] Department |
+| Revenue per Bed (Available) | How much revenue is each available bed generating? | Revenue ÷ Available Beds |
+
+**02 | Patient Throughput**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Patient Visits | How many patients did we treat in total? | [Fact] Operational — Patient Visits |
+| Inpatient Admissions | How many patients were admitted? | [Fact] Operational — Admissions |
+| Discharges | How many patients were discharged? | [Fact] Operational — Discharges |
+| Average Length of Stay (ALOS) | How long do patients stay on average? | Total Bed Days ÷ Discharges |
+| Readmission Rate % | What proportion of discharged patients return within 30 days? | [Fact] Operational — readmission flag |
+| Revenue per Patient | What is the average revenue per patient visit? | Revenue ÷ Patient Visits |
+
+**03 | Capacity & Utilisation**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Bed Occupancy Rate % | What proportion of beds are occupied? | Patient Bed Days ÷ Available Bed Days |
+| Theatre Utilisation % | How efficiently are operating theatres being used? | Procedures scheduled ÷ available slots |
+| OPD Slot Utilisation % | What percentage of outpatient appointment slots are filled? | Appointments ÷ Available Slots |
+| Doctor Utilisation % | Are our doctors fully booked? | Consultations ÷ Available Slots |
+| Available Bed Days | How many bed-days of capacity did we have? | [Fact] Operational — Available Bed Days |
+
+**04 | Cost per Care Episode**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Cost per Patient | What does it cost on average to treat one patient? | Total Care Cost ÷ Patient Visits |
+| Cost per Inpatient Day | What is the daily cost of an inpatient stay? | Inpatient Cost ÷ Patient Bed Days |
+| Direct Care Cost % of Revenue | What proportion of revenue is consumed by direct care costs? | Direct Care Cost ÷ Clinical Revenue |
+| Clinical Supply Cost per Procedure | What are we spending on consumables per procedure? | [Fact] Purchase Order — clinical supplies ÷ procedures |
+| Payroll per Patient | How much staff cost is attributable to each patient? | [Fact] Payroll ÷ Patient Visits |
+
+**05 | Workforce & Staffing**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Clinical Headcount | How many clinical staff do we have? | [Dim] Employee — clinical job family count |
+| Nurse-to-Patient Ratio | Are we adequately staffed for patient volume? | Nursing headcount ÷ Patient Visits |
+| Overtime Hours Cost | How much is excessive overtime costing us? | [Fact] Payroll — Overtime amount |
+| Staff Cost as % of Revenue | How much of revenue is consumed by staff costs? | Payroll ÷ Clinical Revenue |
+| Agency Staff Spend | How much are we spending on agency or contract clinical staff? | [Fact] Payroll — contract type filter |
+
+---
+
+#### Financial Services (Bank / NBFC / Insurance)
+
+**01 | Interest Income & NIM**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Interest Income | How much interest did we earn on our loan and investment book? | [Fact] Financial — Interest Income account |
+| Interest Expense | How much did we pay on deposits and borrowings? | [Fact] Financial — Interest Expense account |
+| Net Interest Income (NII) | What is our net spread after funding costs? | Interest Income − Interest Expense |
+| Net Interest Margin (NIM) % | How efficiently are we converting assets into interest income? | NII ÷ Average Earning Assets |
+| Cost of Funds % | What is the effective rate we are paying on our liabilities? | Interest Expense ÷ Average Interest-Bearing Liabilities |
+| Yield on Advances % | What rate are we earning on our loan book? | Interest on Advances ÷ Average Advances |
+
+**02 | Fee & Non-Interest Income**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Fee Income | How much did we earn from transaction fees and service charges? | [Fact] Financial — Fee Income account |
+| Trading Income | How much did we earn from treasury and trading operations? | [Fact] Financial — Trading account |
+| Total Non-Interest Income | What is our total non-funded income? | Sum of all non-interest revenue accounts |
+| Fee Income % of Total Income | How diversified is our income beyond interest? | Fee Income ÷ (NII + Non-Interest Income) |
+
+**03 | Loan Portfolio**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Loan Book | What is the size of our lending portfolio? | [Fact] Operational — Total Loan Book |
+| Loan Growth % | How fast is our book growing? | YoY change in Total Loan Book |
+| Disbursements | How much did we lend out this period? | [Fact] Operational — new disbursements |
+| Portfolio Mix % | What proportion of the book is retail vs commercial vs SME? | By product/segment |
+
+**04 | Credit Quality**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Gross NPA | What is the total value of non-performing assets? | [Fact] Operational — NPA Book Value |
+| NPA Ratio % | What percentage of our portfolio is non-performing? | Gross NPA ÷ Total Loan Book |
+| Provision Coverage Ratio % | What proportion of NPAs are covered by provisions? | Provisions ÷ Gross NPA |
+| Slippage Rate % | What proportion of standard assets slipped to NPA this period? | New NPAs ÷ Prior Standard Assets |
+| Credit Cost % | What is our annualised cost of credit? | Provisions Charged ÷ Average Loan Book |
+
+**05 | Operating Efficiency**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Cost-to-Income Ratio % | How efficiently are we managing our cost base relative to income? | Operating Costs ÷ Operating Income |
+| OPEX per Employee | How much does each employee cost the business? | OPEX ÷ Headcount |
+| Revenue per Employee | How much income does each employee generate? | Total Income ÷ Headcount |
+| Claims Ratio % (Insurance) | What proportion of premiums are paid out as claims? | Claims ÷ Gross Written Premium |
+| Loss Ratio % (Insurance) | Including adjustment expenses, what is the total loss ratio? | (Claims + LAE) ÷ Earned Premium |
+
+---
+
+#### Hospitality (Hotels / Resorts / Serviced Apartments)
+
+**01 | Room Revenue & Rate**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Room Revenue | What is our total revenue from room sales? | [Fact] Operational — Room Revenue |
+| Average Daily Rate (ADR) | What price did we achieve per occupied room per night? | Room Revenue ÷ Occupied Room Nights |
+| RevPAR | How much revenue per available room did we generate? | Room Revenue ÷ Available Room Nights |
+| Rate by Room Type | Are premium room types achieving premium rates? | ADR by product (room type) |
+| Rate vs Competitor Index | How does our rate compare to our comp set? | ADR ÷ Market ADR (if comp data available) |
+
+**02 | Occupancy & Availability**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Occupancy Rate % | What proportion of our available rooms did we sell? | Occupied Room Nights ÷ Available Room Nights |
+| Available Room Nights | What was our total sellable inventory? | [Fact] Operational — Available Room Nights |
+| Occupied Room Nights | How many room nights did we actually sell? | [Fact] Operational — Occupied Room Nights |
+| Occupancy by Day of Week | Which days are busiest? | Occupancy Rate by [Dim] Date — Day Name |
+| Occupancy vs Prior Year | Are we filling more or fewer rooms than last year? | YoY comparison on Occupancy Rate % |
+
+**03 | F&B Performance**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| F&B Revenue | How much revenue did Food & Beverage generate? | [Fact] Financial — F&B Revenue account |
+| F&B Revenue per Cover | What is the average spend per dining guest? | F&B Revenue ÷ Covers |
+| F&B Cost % | What proportion of F&B revenue is consumed by food cost? | F&B Cost ÷ F&B Revenue |
+| F&B Contribution | What is the net contribution of F&B after direct costs? | F&B Revenue − F&B Direct Cost |
+
+**04 | Property Operating Profit**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Revenue | What is our total revenue across all departments? | All revenue accounts |
+| Departmental Profit | What is the profit contribution by department before undistributed costs? | Revenue − Direct Cost per department |
+| Undistributed Expenses | What are the costs that cannot be attributed to a specific department? | [Fact] Financial — Undistributed account |
+| Gross Operating Profit (GOP) | What is our operating profit before fixed charges? | Departmental Profit − Undistributed Expenses |
+| GOPPAR | What GOP are we generating per available room per night? | GOP ÷ Available Room Nights |
+| GOP Margin % | What proportion of total revenue flows through to GOP? | GOP ÷ Total Revenue |
+
+---
+
+#### Logistics / Supply Chain
+
+**01 | Revenue & Freight**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Freight Revenue | How much revenue did we generate from freight services? | [Fact] Financial — Revenue accounts |
+| Revenue per Shipment | How much revenue does each shipment generate? | Revenue ÷ Total Shipments |
+| Revenue by Mode | Which freight mode (air, sea, road) generates the most revenue? | By [Dim] Product category |
+| Revenue by Lane | Which origin-destination lanes are most valuable? | By geography pairs |
+
+**02 | Delivery Performance**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Total Shipments | How many shipments did we process? | [Fact] Operational — Total Shipments |
+| On-Time Delivery Rate % | What proportion of shipments arrived on or before the promised date? | On Time Deliveries ÷ Total Shipments |
+| Late Shipments | How many shipments were delayed? | Total − On Time |
+| Average Transit Days | How long does it take to deliver on average? | Sum of transit days ÷ shipments |
+| Damage Rate % | What proportion of shipments had damage claims? | Damaged Shipments ÷ Total Shipments |
+
+**03 | Network Cost**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Cost per Shipment | What does it cost to move one shipment end to end? | Total Operating Cost ÷ Total Shipments |
+| Cost per Kg / CBM | What is the cost per unit of weight or volume carried? | Total Cost ÷ Weight or Volume |
+| Fuel Cost % of Revenue | How much of revenue is consumed by fuel? | Fuel Cost ÷ Revenue |
+| Line Haul Cost | What are the primary transportation costs? | [Fact] Financial — Line Haul account |
+| Last-Mile Cost per Drop | What does each final delivery cost? | Last-Mile Cost ÷ Drops |
+
+**04 | Capacity Utilisation**
+| Measure Type | Business Question | Source |
+|-------------|------------------|--------|
+| Warehouse Utilisation % | What proportion of warehouse capacity is in use? | Occupied Capacity ÷ Total Capacity |
+| Fleet Utilisation % | What proportion of vehicle days are revenue-generating? | Active Vehicle Days ÷ Available Vehicle Days |
+| Load Factor % | How full are our vehicles on average? | Actual Load ÷ Vehicle Capacity |
+| Empty Miles % | What proportion of vehicle miles are driven empty? | Empty Miles ÷ Total Miles |
+
+---
+
+### Variance vs Plan Folder — Present in All Industries
+
+Every industry always gets a Variance folder. The measures inside it reference the industry's
+actual P&L line names — not generic "Revenue" and "COGS."
+
+For each major P&L line identified in DimAccount (read dynamically), generate:
+- `[P&L Line] vs Plan` — monetary variance
+- `[P&L Line] vs Plan %` — percentage variance
+- `[P&L Line] vs Prior Year` — YoY monetary variance
+- `[P&L Line] vs Prior Year %` — YoY percentage variance
+- `[P&L Line] vs Forecast` — forecast accuracy measure
+- `Overall Variance Flag` — text flag for conditional formatting
+
+For example, a SaaS model generates: `MRR vs Plan`, `MRR vs Plan %`, `ARR vs Plan`, `EBITDA vs Plan %`
+A hospital generates: `Clinical Revenue vs Plan`, `Direct Care Cost vs Plan`, `GOP vs Plan %`
+A hotel generates: `RevPAR vs Plan`, `ADR vs Plan`, `Occupancy vs Plan %`, `GOPPAR vs Plan`
+
+---
+
+### Period Trends & YTD Folder — Present in All Industries
+
+When Period Comparison or YTD use cases are selected, generate this folder with
+industry-appropriate measures using the same P&L line names identified dynamically.
+
+Core measures for all industries (naming adapts to P&L vocabulary):
+- YTD [Primary Revenue Line] — cumulative revenue from year start
+- YTD [Primary Revenue Line] vs Plan — YTD variance
+- Prior Year [Primary Revenue Line] — same period last year
+- YoY [Primary Revenue Line] Growth % — year-over-year growth
+- 3M Rolling [Primary Revenue Line] — 3-month rolling total
+- 12M Rolling [Primary Revenue Line] — trailing 12-month total
+- QTD [Primary Revenue Line] — quarter-to-date
+- [Primary Revenue Line] MTD — month-to-date
+
+---
+
+### Forecasting Folder — Present When Use Case Selected
+
+Generate when the Forecasting use case is selected. Content is the same structure
+across all industries but references the industry's primary revenue and profit lines.
+
+- Latest Actual Month — the most recent month with actual data
+- Elapsed Months — months in the current year with actuals
+- Remaining Months — months still to be forecast
+- Run Rate [Primary Revenue Line] — annualised from YTD actual
+- Full Year Estimate [Primary Revenue Line] — YTD actual + remaining forecast
+- FYE vs Full Year Plan [Primary Revenue Line] — gap to plan
+- FYE vs Full Year Plan % — proportional gap
+
+---
+
+### Scenario Comparison Folder — Present When Use Case Selected
+
+Standard structure, fully adapted to the actual scenario names from DimScenario:
+
+- Selected [Scenario Name] [Primary Revenue Line] — slicer-driven scenario switching
+- [Plan Scenario] vs [Forecast Scenario] Gap — how much has the view changed
+- [Forecast Scenario] vs [Revised Forecast Scenario] Gap — forecast revision movement
+- Best Case / Worst Case / Scenario Range — across all three planning scenarios
+
+---
+
+### Ranking & Pareto Folder — Present When Use Case Selected
+
+Generate ranking measures for the primary revenue driver dimension of the industry:
+
+| Industry | Ranked by | Dimension |
+|----------|-----------|-----------|
+| SaaS | MRR | [Dim] Customer (Customer Name) |
+| Retail | Net Sales | [Dim] Product (Product Name) |
+| Manufacturing | Production Volume | [Dim] Product (Product Name) |
+| Healthcare | Revenue | [Dim] Department (Department Name) |
+| Financial Services | Loan Book | [Dim] Customer (Customer Name) |
+| Hospitality | Room Revenue | [Dim] Product (Room Type) |
+| Logistics | Freight Revenue | Geography (Lane or Origin-Destination) |
+
+Measures:
+- [Primary Metric] Rank — RANKX by primary metric within current filter context
+- Cumulative [Primary Metric] % — running share for Pareto line
+- Is Top 20% — "Top 20%" / "Remaining 80%" flag
+- Top 10 [Primary Metric] % — concentration metric
+
+
+---
+
+## BIM File Structure
+
+The `model.bim` file is a standard Tabular Model JSON.
+Always use compatibility level `1600` (see SKILL.md frontmatter) — not `1550`.
+
+```json
+{
+  "name": "[company]_[industry]_model",
+  "compatibilityLevel": 1600,
+  "model": {
+    "description": "[ATTRIBUTION BLOCK]",
+    "defaultPowerBIDataSourceVersion": "PowerBI_V3",
+    "discourageImplicitMeasures": true,
+    "tables": [ ... ],
+    "relationships": [ ... ],
+    "expressions": [ ... ]
+  }
+}
+```
+
+**Critical structure rules (learned from compatibility testing):**
+
+| Property | Correct Location | Wrong Location |
+|----------|-----------------|----------------|
+| `defaultPowerBIDataSourceVersion` | Inside `"model"` object | ❌ Root level (sibling of `"model"`) |
+| `discourageImplicitMeasures` | Inside `"model"` object | ❌ Root level (sibling of `"model"`) |
+| `compatibilityLevel` | Root level (sibling of `"model"`) | ❌ Inside `"model"` object |
+| `"cultures"` / `linguisticMetadata` | **Never include** — causes compatibility errors | — |
+
+The value for `defaultPowerBIDataSourceVersion` must be `"PowerBI_V3"` — not `"powerBIDataSourceV3"` (the lowercase variant is rejected by Power BI Desktop).
+
+### DatasetFolder Expression — Correct Syntax
+
+The `DatasetFolder` M parameter is a required root-level expression in every BIM file.
+It is the single place the user updates the path after deployment.
+
+**Correct JSON structure (verified against Power BI Desktop):**
+
+```json
+{
+  "name": "DatasetFolder",
+  "description": "Path to the folder containing all CSV files. Update before deploying.",
+  "kind": "m",
+  "expression": "\"D:\\\\Projects\\\\Dataset\" meta [IsParameterQuery=true, Type=\"Text\", IsParameterQueryRequired=true]"
+}
+```
+
+**Rules that must never be broken:**
+
+| Rule | Correct | Wrong |
+|------|---------|-------|
+| `expression` type | Plain string | ❌ Array of strings (the `["let", ...]` list format) |
+| Path quoting | Path wrapped in escaped quotes inside the string | ❌ Bare path without surrounding quotes |
+| Backslash escaping | `\\\\` in JSON = `\\` in M = single `\` on disk | ❌ Single `\\` in JSON |
+| `meta` annotation | On the same line, immediately after closing path quote | ❌ On a separate line or in a `let/in` block |
+| `kind` field | `"m"` | ❌ `"M"` (case-sensitive) |
+
+**How each partition M expression references the parameter:**
+
+```json
+{
+  "name": "[Dim] Date",
+  "dataView": "full",
+  "source": {
+    "type": "m",
+    "expression": [
+      "let",
+      "    Source = Csv.Document( File.Contents( DatasetFolder & \"\\\\DimDate.csv\" ),",
+      "        [ Delimiter = \",\", Columns = null, Encoding = 65001, QuoteStyle = QuoteStyle.None ] ),",
+      "    #\"Promoted Headers\" = Table.PromoteHeaders( Source, [ PromoteAllScalars = true ] )",
+      "in",
+      "    #\"Promoted Headers\""
+    ]
+  }
+}
+```
+
+Note: partition `expression` IS an array of strings. Only the root `DatasetFolder` expression is a plain string.
+
+---
+
+### Column and Table Description — Required BIM Properties
+
+Every column object and every table object in the BIM **must** include a `"description"` property.
+Without it, the field list tooltip in Power BI Desktop is blank and documentation tools cannot read the model.
+
+**Correct column JSON (description is a sibling of name — never nested):**
+
+```json
+{
+  "name": "Account Code",
+  "description": "Alphanumeric code following the industry chart of accounts convention. Unique per leaf account.",
+  "dataType": "string",
+  "sourceColumn": "AccountCode",
+  "isHidden": false,
+  "annotations": [
+    { "name": "SummarizationSetBy", "value": "User" }
+  ]
+}
+```
+
+**Column with `sortByColumn` (required for label columns sorted by numeric order):**
+
+```json
+{
+  "name": "Month Short Name",
+  "description": "Three-letter month abbreviation (Jan, Feb, Mar...). Used on compact chart axes.",
+  "dataType": "string",
+  "sourceColumn": "MonthShortName",
+  "isHidden": false,
+  "sortByColumn": "Month Number",
+  "annotations": [
+    { "name": "SummarizationSetBy", "value": "User" }
+  ]
+}
+```
+
+The `sortByColumn` value uses the **display name** of the target column (post-rename), not the raw source name. The target column must exist in the same table.
+
+**Correct table JSON (description is a sibling of name):**
+
+```json
+{
+  "name": "[Dim] Account",
+  "description": "Chart of accounts for the P&L hierarchy. Organises financial line items from revenue through to net profit using a parent-child structure.",
+  "columns": [ ... ],
+  "partitions": [ ... ],
+  "annotations": [
+    { "name": "PBI_ResultType", "value": "Table" }
+  ]
+}
+```
+
+**Correct Measure table JSON — must use a calculated partition with a hidden column:**
+
+Power BI Desktop requires the Measure table to have at least one column and a valid partition source. An empty `"columns": []` causes the table to be silently ignored and no measures appear in the Fields pane.
+
+**Critical:** The placeholder column must carry three specific properties — `type: "calculatedTableColumn"`, `sourceColumn: "[_]"` (square brackets required), and `isNameInferred: true`. Without these, Tabular Editor refuses to deploy with the error: `Column '_' in calculated table 'Measure' is missing the SourceColumn property`.
+
+```json
+{
+  "name": "Measure",
+  "description": "All DAX measures for this model. The _ column is a hidden placeholder — only the measures inside the display folders are visible to report users.",
+  "columns": [
+    {
+      "type":            "calculatedTableColumn",
+      "name":            "_",
+      "dataType":        "string",
+      "sourceColumn":    "[_]",
+      "isNameInferred":  true,
+      "isHidden":        true,
+      "description":     "Hidden placeholder column required for Power BI Desktop to register the Measure table. Not used in any report visual.",
+      "annotations": [
+        { "name": "SummarizationSetBy", "value": "User" }
+      ]
+    }
+  ],
+  "measures": [ ... ],
+  "partitions": [
+    {
+      "name": "Measure",
+      "mode": "import",
+      "source": {
+        "type": "calculated",
+        "expression": "DATATABLE( \"_\", STRING, {{\"\"}} )"
+      }
+    }
+  ],
+  "isHidden": false,
+  "annotations": [
+    { "name": "PBI_ResultType",         "value": "Table"      },
+    { "name": "PBI_NavigationStepName", "value": "Navigation" }
+  ]
+}
+```
+
+**Why all three properties matter:**
+
+| Property | Why It's Required |
+|----------|------------------|
+| `type: "calculatedTableColumn"` | Tells Tabular Editor the column comes from a calculated table partition, not an imported one |
+| `sourceColumn: "[_]"` | The DAX-internal reference name — must match the column name in the DATATABLE expression, wrapped in square brackets |
+| `isNameInferred: true` | Tells the engine the column name was inferred from the DATATABLE expression, not explicitly set during partition creation |
+
+**Correct measure JSON — description and annotations both required:**
+
+```json
+{
+  "name": "Gross Margin %",
+  "expression": "DIVIDE( [Gross Profit], [Net Revenue] )",
+  "formatString": "0.0%",
+  "displayFolder": "03 | Commercial Margin",
+  "description": "Gross profit as a percentage of net revenue. Higher margin indicates stronger pricing power.",
+  "annotations": [
+    { "name": "PBI_FormatHint", "value": "{\"isGeneralNumber\":false}" }
+  ]
+}
+```
+
+**Why annotations matter for measures:**
+Without the `PBI_FormatHint` annotation on measures, Power BI Desktop ignores the `formatString` and applies its default auto-format — causing percentages to appear as decimals and currencies to lose their symbol. Always include this annotation on every measure.
+
+---
+
+### Deployment — Why Measures May Not Appear in Power BI Desktop
+
+**The most common reason measures do not update after deploying from Tabular Editor:**
+
+1. **Not saving in Tabular Editor before deploying** — Always press `Ctrl+S` in Tabular Editor after loading the BIM, before clicking Deploy. Without saving, Tabular Editor deploys the previously cached version.
+
+2. **Deploying to the wrong instance** — If multiple Power BI Desktop windows are open, Tabular Editor may connect to the wrong one. Close all but the target window before deploying.
+
+3. **Missing `PBI_FormatHint` annotation** — Measures appear in the field list but show wrong format. Add the annotation as shown above.
+
+4. **Power BI Desktop not refreshed after deploy** — After a successful deploy, click **Refresh** in the Home ribbon in Power BI Desktop (or close and reopen the file). The visual field list does not auto-update.
+
+5. **`discourageImplicitMeasures: true` missing inside `model`** — Without this flag, Power BI Desktop auto-creates implicit measures from numeric columns that conflict with the explicit measures in the Measure table.
+
+**Correct deploy sequence:**
+```
+1. Open model.bim in Tabular Editor
+2. Update DatasetFolder path (File → Edit Expression)
+3. Press Ctrl+S to save
+4. External Tools → Deploy (or Model → Deploy)
+5. Select the correct Power BI Desktop instance
+6. Click OK — wait for "Deployment successful"
+7. Switch to Power BI Desktop → click Refresh (Home ribbon)
+8. Open the Fields pane — expand Measure table — verify display folders
+```
+
+The `displayFolder` and `name` are always industry-driven — never hardcoded to generic names.
+The examples below show what the JSON looks like for two different industries.
+
+**B2B SaaS example:**
+```json
+{
+  "name": "MRR",
+  "expression": "CALCULATE( SUM( '[Fact] Invoice Line'[Net Amount] ), KEEPFILTERS( '[Dim] Account'[Account Code] = \"REV-SUB\" ) )",
+  "formatString": "₹#,##0",
+  "displayFolder": "01 | Subscription Revenue",
+  "description": "Monthly Recurring Revenue — subscription income recognised in the selected month."
+}
+```
+
+**Healthcare example:**
+```json
+{
+  "name": "Bed Occupancy Rate %",
+  "expression": "DIVIDE( SUM( '[Fact] Operational'[Patient Bed Days] ), SUM( '[Fact] Operational'[Available Bed Days] ) )",
+  "formatString": "0.0%",
+  "displayFolder": "03 | Capacity & Utilisation",
+  "description": "Proportion of available beds occupied in the selected period. Higher is better up to ~85% — above that, operational risk increases."
+}
+```
+
+The folder name, measure name, format, and description all change by industry.
+Never use `"06 | KPI & Ratios"` or `"07 | Revenue & Sales"` — those are generic labels that do not belong in any specific industry model.
+
+---
+
+### Hierarchy JSON Template (inside table object)
+
+Hierarchies are added to dimension tables only. The `"hierarchies"` key is a sibling
+of `"columns"` and `"partitions"` inside the table object.
+
+```json
+{
+  "name": "[Dim] Account",
+  "columns": [ ... ],
+  "partitions": [ ... ],
+  "hierarchies": [
+    {
+      "name": "[H] Account Hierarchy",
+      "description": "P&L drill-down from top-level category to individual posting account.",
+      "levels": [
+        { "name": "P&L Category",  "ordinal": 0, "column": "Level 1 Name" },
+        { "name": "Account Group", "ordinal": 1, "column": "Level 2 Name" },
+        { "name": "Account",       "ordinal": 2, "column": "Account Name" }
+      ]
+    }
+  ]
+}
+```
+
+**Hierarchy naming rule:** All hierarchies use the `[H]` prefix — distinguishes them
+from columns in the Power BI field list at a glance. The `[H]` prefix is always
+followed by a space and a descriptive name: `[H] Date`, `[H] Geography`,
+`[H] Organisation Chart`.
+
+**Tables with hierarchies:**
+
+| Table | Hierarchy Name | Levels (broadest → most granular) |
+|-------|---------------|----------------------------------|
+| `[Dim] Account` | `[H] Account Hierarchy` | P&L Category → Account Group → Account |
+| `[Dim] Product` | `[H] Product Hierarchy` | Category → Sub-Category → Product |
+| `[Dim] Geography` | `[H] Geography` | Region → Country → State → City |
+| `[Dim] Date` | `[H] Date` | Year → Quarter → Month → Date |
+| `[Dim] Date` | `[H] Fiscal Date` | Fiscal Year → Fiscal Quarter → Fiscal Month |
+| `[Dim] Business Unit` | `[H] Business Unit` | Company → Business Unit → Division |
+| `[Dim] Department` | `[H] Department` | Division → Department → Team |
+| `[Dim] Customer` | `[H] Customer` | Parent Company → Subsidiary → Customer |
+| `[Dim] Supplier` | `[H] Supplier` | Parent Group → Subsidiary → Supplier |
+| `[Dim] Asset` | `[H] Asset` | Asset Category → Sub-Category → Asset |
+| `[Dim] Employee` | `[H] Organisation Chart` | Executive → Senior Leader → Manager → Team Lead → Employee |
+
+**Level presence check:** A hierarchy is only written when all its level columns
+exist in the table. If a level is absent the hierarchy is reduced (one level missing)
+or skipped entirely (two or more levels missing). This prevents deployment errors.
+
+---
+
+### Sort-by-Column Rules
+
+Power BI sorts string columns alphabetically by default. For label columns this is
+wrong — months appear as Apr, Aug, Dec rather than Jan, Feb, Mar. The `sortByColumn`
+property in the BIM tells Power BI to display values in the order of a different
+column, almost always a numeric one.
+
+**Standard sort relationships applied automatically:**
+
+| Table | Column to Sort | Sort By Column |
+|-------|---------------|----------------|
+| `[Dim] Date` | `Month Short Name` | `Month Number` |
+| `[Dim] Date` | `Month Name` | `Month Number` |
+| `[Dim] Date` | `Quarter Label` | `Calendar Quarter` |
+| `[Dim] Date` | `Year Month Label` | `Year Month` |
+| `[Dim] Date` | `Day Name` | `Day Of Week` |
+| `[Dim] Account` | `Account Name` | `Sort Order` |
+| `[Dim] Account` | `Account Short Name` | `Sort Order` |
+| `[Dim] Account` | `Level 1 Name` → `Level 3 Name` | `Level N Key` |
+| `[Dim] Product` | `Product Name` | `Sort Order` |
+| `[Dim] Product` | `Level 1/2/3 Name` | `Level N Key` |
+| `[Dim] Geography` | `Geography Name` | `Sort Order` |
+| `[Dim] Geography` | `Level 1/2/3/4 Name` | `Level N Key` |
+| `[Dim] Business Unit` | `Business Unit Name` | `Sort Order` |
+| `[Dim] Department` | `Department Name` | `Sort Order` |
+| `[Dim] Customer` | `Customer Name` | `Sort Order` |
+| `[Dim] Supplier` | `Supplier Name` | `Sort Order` |
+| `[Dim] Asset` | `Asset Name` | `Sort Order` |
+| `[Dim] Scenario` | `Scenario Name` | `Sort Order` |
+| `[Dim] Employee` | `Job Grade` | `Job Grade Num` |
+
+**Why this matters for the P&L (Accounts):** Power BI displays leaf accounts in
+alphabetical order by default — meaning `Accounts Receivable` appears before
+`Revenue` in a Matrix visual. Sorting `Account Name` by `Sort Order` ensures the
+P&L renders in the correct income-statement order: Revenue → COGS → Gross Profit →
+OPEX → EBITDA → Net Profit.
+
+**Generic detection for any dataset:** The `detect_generic_sort_relationships()`
+function scans column names in any table not covered by `SORT_RULES` and applies
+sort relationships from patterns:
+- `X Label` → looks for `X Number`, `X Num`, or `X Key`
+- `X Short Name` → looks for `X Number`
+- `X Name` where X is time-related → looks for `X Number` or `X Key`
+
+This makes the skill work on any dataset — including custom industry tables — without
+the user having to add explicit rules.
+
+**Validation:** A sort rule is applied only when both the target column and the sort
+column exist in the table. Missing columns are silently skipped. Self-references
+(sorting a column by itself) are blocked.
+
+---
+
+## Python Script Template (`build_model.py`)
+
+The generated script handles both Mode 1 and Mode 2 via a `MODE` config variable.
+Structure is identical — only the schema ingestion block differs.
+
+```python
+# [ATTRIBUTION BLOCK at top]
+
+import os, json, datetime, zipfile, re, glob, pandas as pd
+from pathlib import Path
+
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+INDUSTRY_NAME   = "[industry]"
+COMPANY_NAME    = "[company]"
+OUTPUT_FOLDER   = "./pbix_model_output"
+BIM_FILENAME    = f"{INDUSTRY_NAME.lower().replace(' ', '_')}_model.bim"
+MD_FILENAME     = f"{INDUSTRY_NAME.lower().replace(' ', '_')}_measures_reference.md"
+
+USE_CASES       = [...]    # list of confirmed use case keys
+PERSONA         = "..."    # confirmed persona label
+
+ATTRIBUTION = (
+    f"Enterprise PBIX Model Builder v3.0 | "
+    f"Designed & Developed by Logeshkumar Sivakumar | elogu2001@outlook.com | "
+    f"Industry: {INDUSTRY_NAME} | Company: {COMPANY_NAME} | "
+    f"Generated: {datetime.date.today()} | "
+    "© 2026 Logeshkumar Sivakumar. All rights reserved. "
+    "This semantic model design, DAX architecture, display folder structure, "
+    "relationship mapping, and documentation are the original intellectual work of "
+    "Logeshkumar Sivakumar. Unauthorised reproduction or redistribution is prohibited. "
+    "Contact: elogu2001@outlook.com"
+)
+
+# ── MODE SELECTION ───────────────────────────────────────────────────────────
+# Set by the skill based on the input mode detected during intake
+MODE = "integrated"   # "integrated" (Mode 1) | "standalone" (Mode 2)
+
+# Mode 1 paths
+CSV_FOLDER      = "./csv_output"
+
+# Mode 2 paths
+PBIX_PATH       = "./uploaded.pbix"        # path to uploaded PBIX
+PUBLIC_DOC      = "./dataset_guide_public.md"   # optional
+INTERNAL_DOC    = "./dataset_guide_internal.md" # optional
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# ── STEP 1: INGEST SCHEMA (mode-specific) ───────────────────────────────────
+
+if MODE == "integrated":
+    # Read table list and column headers from CSV files
+    csv_files = {f.stem: f for f in Path(CSV_FOLDER).glob("*.csv")}
+    present_tables = set(csv_files.keys())
+    table_schemas = {
+        name: list(pd.read_csv(path, nrows=0).columns)
+        for name, path in csv_files.items()
+    }
+    # Read scenario names from DimScenario if available
+    scenario_names = ["Actual", "Plan", "Forecast", "Revised Forecast"]
+    if "DimScenario" in csv_files:
+        dim_scenario = pd.read_csv(csv_files["DimScenario"])
+        scenario_names = dim_scenario["ScenarioName"].tolist()
+
+    # Read descriptions from documentation files
+    internal_descs, public_descs = {}, {}
+    int_docs = glob.glob(f"{CSV_FOLDER}/*_dataset_guide_internal.md")
+    pub_docs = glob.glob(f"{CSV_FOLDER}/*_dataset_guide_public.md")
+    if int_docs:
+        _, internal_descs = parse_description_doc(int_docs[0])
+    if pub_docs:
+        _, public_descs  = parse_description_doc(pub_docs[0])
+
+elif MODE == "standalone":
+    # Extract table names from PBIX DiagramLayout
+    pbix_data = parse_pbix(PBIX_PATH)
+    display_table_names = pbix_data["tables"]           # already display names
+    present_tables      = set(display_table_names)
+    naming_convention   = detect_naming_convention(display_table_names)
+
+    # Read descriptions from uploaded doc files (whichever are available)
+    internal_descs, public_descs = {}, {}
+    if os.path.exists(INTERNAL_DOC):
+        _, internal_descs = parse_description_doc(INTERNAL_DOC)
+    if os.path.exists(PUBLIC_DOC):
+        _, public_descs   = parse_description_doc(PUBLIC_DOC)
+
+    # Column schemas: read from any CSVs the user also uploaded
+    # If no CSVs, table_schemas will be empty — descriptions fall back to catalogue
+    csv_files = {f.stem: f for f in Path("./").glob("*.csv")}
+    table_schemas = {
+        name: list(pd.read_csv(path, nrows=0).columns)
+        for name, path in csv_files.items()
+        if name in {t.lstrip("[Dim] ").lstrip("[Fact] ") for t in present_tables}
+    }
+
+# ── DESCRIPTION LOOKUP TABLES ───────────────────────────────────────────────
+# Built from the skill's Table & Column Description Catalogue.
+# Used when no documentation files are available or when a column is not covered.
+# Keys for column lookup: (raw_table_name, raw_column_name)
+# Keys for table lookup : raw_table_name
+
+BUILTIN_TABLE_DESCS = {
+    "DimDate":              "Calendar reference table covering Jan 2020 to Dec 2026. Used to filter and group all fact data by day, month, quarter, and year. Every fact table joins to this table on its date column.",
+    "DimAccount":           "Chart of accounts for the P&L hierarchy. Organises all financial line items from revenue through to net profit using a parent-child structure. Each leaf account directly receives amounts from a source transaction table.",
+    "DimBusinessUnit":      "Three-level organisational hierarchy — Company → Business Unit → Division. Used to slice financial and operational data by the internal structure of the business.",
+    "DimDepartment":        "Three-level cost centre hierarchy — Division → Department → Team. Provides the staffing and cost allocation dimension for payroll and expense reporting.",
+    "DimGeography":         "Four-level location hierarchy — Region → Country → State → City. Used across all financial and operational fact tables to analyse performance by location.",
+    "DimProduct":           "Three-level product hierarchy — Category → Sub-Category → Product. Each leaf product has a unique alphanumeric code and is linked to sales and operational metrics.",
+    "DimCustomer":          "Three-level customer hierarchy — Parent Company → Subsidiary → Division. Leaf nodes represent the billable entity and carry contract, segment, and credit attributes.",
+    "DimSupplier":          "Three-level supplier hierarchy — Parent Group → Subsidiary → Supplier Unit. Leaf nodes represent the transacting supplier and carry category, rating, and lead time attributes.",
+    "DimEmployee":          "Full employee master with self-referencing org chart. Each row represents one employee with their grade, department, salary band, and direct manager reference used to build the reporting hierarchy.",
+    "DimAsset":             "Fixed asset register with three-level hierarchy — Asset Category → Sub-Category → Asset. Each leaf asset carries its acquisition cost, useful life, and monthly depreciation schedule.",
+    "DimScenario":          "Planning scenario reference table. Distinguishes between Actual (reported), Plan (annual budget), Forecast (mid-year estimate), and Revised Forecast (Q3 update) across all financial data.",
+    "DimMacroEvent":        "Reference table of real-world macro events that affected the company's financials. Each event includes its intensity, duration, and the P&L lines it impacted.",
+    "DimClinicalTrial":     "Clinical trial reference table. Each row represents one trial with its phase, therapeutic area, status, and planned patient enrollment target.",
+    "FactFinancial":        "Monthly P&L summary — the primary reporting fact table. Every row represents one account × one business unit × one geography × one month of aggregated financial data.",
+    "FactPlan":             "Monthly planning data for all planning scenarios. Same grain as FactFinancial. Used for variance analysis, scenario comparison, and full-year estimates.",
+    "FactSalesOrder":       "Daily sales transaction table at invoice line level. One row per product per order. Source for all revenue P&L lines and commercial metrics.",
+    "FactPurchaseOrder":    "Daily procurement transaction table at PO line level. One row per material or service per order. Source for COGS raw material and direct procurement lines.",
+    "FactPayroll":          "Monthly payroll run table at employee level. One row per employee per payroll cycle. Source for all staff cost P&L lines across direct labour and OPEX.",
+    "FactExpenseClaim":     "Daily expense submission table at claim line level. Source for travel, marketing, and G&A OPEX lines.",
+    "FactDepreciation":     "Monthly depreciation schedule at asset level. One row per asset per month. Source for the depreciation and amortisation P&L line.",
+    "FactAssetMaintenance": "Per-event maintenance cost table. One row per maintenance activity per asset. Source for the maintenance and repair OPEX line.",
+    "FactClinicalTrial":    "Clinical trial spend and activity table. One row per trial per reporting period. Source for R&D clinical trial cost lines.",
+    "FactJournalEntry":     "Monthly journal entry table for P&L accounts with no natural transaction source — accruals, provisions, FX, interest.",
+    "FactMacroEventImpact": "Monthly quantified impact of each macro event on each P&L account. Enables analysis of how much variance was driven by external shocks.",
+    "FactTax":              "Monthly tax liability table at business unit level. Source for the tax expense line in the P&L.",
+    "FactUtility":          "Monthly utility consumption and cost table at location level. Source for the utilities OPEX line.",
+    "FactCapEx":            "Capital expenditure transaction table. Tracks investment against approved budgets and links to the asset being constructed or acquired.",
+}
+
+BUILTIN_COL_DESCS = {
+    # DimDate
+    ("DimDate", "DateKey"):         "Surrogate integer key in YYYYMMDD format. Used as the join column to all fact tables.",
+    ("DimDate", "FullDate"):        "The calendar date. Every fact table joins to this column.",
+    ("DimDate", "YearMonth"):       "Year and month combined as an integer (e.g., 202401). Used for sorting time-series visuals in the correct order.",
+    ("DimDate", "YearMonthLabel"):  "Human-readable month label (e.g., Jan 2024). Used on report axes and card visuals.",
+    ("DimDate", "CalendarYear"):    "Four-digit calendar year (e.g., 2024).",
+    ("DimDate", "CalendarQuarter"): "Quarter number within the year — 1, 2, 3, or 4.",
+    ("DimDate", "QuarterLabel"):    "Quarter formatted as a label (e.g., Q1 2024). Used on report axes.",
+    ("DimDate", "MonthNumber"):     "Month number within the year — 1 through 12. Used for sorting month labels.",
+    ("DimDate", "MonthName"):       "Full month name (e.g., January).",
+    ("DimDate", "MonthShortName"):  "Three-letter month abbreviation (e.g., Jan). Used on compact chart axes.",
+    ("DimDate", "DayOfWeek"):       "Day number within the week — 1 (Sunday) through 7 (Saturday).",
+    ("DimDate", "DayName"):         "Full day name (e.g., Monday).",
+    ("DimDate", "WeekNumber"):      "ISO week number within the year.",
+    ("DimDate", "IsWeekend"):       "Yes if Saturday or Sunday; No for weekdays.",
+    ("DimDate", "IsMonthEnd"):      "Yes if this date is the last day of the month. Used to select month-end snapshots.",
+    ("DimDate", "FiscalYear"):      "Fiscal year label if the company's financial year differs from the calendar year.",
+    ("DimDate", "FiscalQuarter"):   "Fiscal quarter number within the fiscal year.",
+    ("DimDate", "FiscalMonth"):     "Month number within the fiscal year.",
+    # DimAccount
+    ("DimAccount", "AccountKey"):       "Unique integer identifier for each account. Root accounts (Level 1) have the lowest keys.",
+    ("DimAccount", "AccountCode"):      "Alphanumeric code following the industry's chart of accounts convention (e.g., REV-SUB, OPEX-STAFF). Unique per leaf account.",
+    ("DimAccount", "AccountName"):      "Full descriptive name of the account as used in financial reporting.",
+    ("DimAccount", "AccountShortName"): "Abbreviated name used in report column headers and compact visuals.",
+    ("DimAccount", "AccountType"):      "High-level classification — Revenue, COGS, OpEx, CapEx, Depreciation, Finance, Tax, or Statistical.",
+    ("DimAccount", "AccountSubType"):   "Finer classification within Account Type.",
+    ("DimAccount", "IsLeafNode"):       "Yes for posting accounts that directly receive financial amounts. No for rollup nodes.",
+    ("DimAccount", "IsCalculated"):     "Yes for computed subtotals in the reporting layer (e.g., Gross Profit, EBITDA).",
+    ("DimAccount", "SignConvention"):   "Applied when displaying amounts — shows costs as negative and revenue as positive. Hidden from report users.",
+    ("DimAccount", "SortOrder"):        "Display sequence of this account within its siblings. Controls P&L visual ordering.",
+    ("DimAccount", "AccountDepth"):     "Depth of this account in the hierarchy — 1 for root, increasing for sub-groups and leaves.",
+    ("DimAccount", "Level1Name"):       "Name of the root ancestor — the top-level P&L category this account rolls up to.",
+    ("DimAccount", "Level2Name"):       "Name of the Level 2 ancestor group.",
+    ("DimAccount", "Level3Name"):       "Name of the Level 3 ancestor sub-group. Blank if the account is at Level 1 or 2.",
+    # DimScenario
+    ("DimScenario", "ScenarioKey"):         "Unique integer identifier — 1 = Actual, 2 = Plan, 3 = Forecast, 4 = Revised Forecast.",
+    ("DimScenario", "ScenarioName"):        "Display name used in all DAX CALCULATE filters. Never hardcode this value in DAX — always read from this column.",
+    ("DimScenario", "ScenarioType"):        "Broad classification — Actual (reported data) or Plan (forward-looking estimate).",
+    ("DimScenario", "ScenarioDescription"): "Plain English description of when and how this scenario was prepared.",
+    ("DimScenario", "SortOrder"):           "Controls scenario order in slicers — Actual, Plan, Forecast, Revised Forecast.",
+    # DimEmployee
+    ("DimEmployee", "EmployeeKey"):     "Unique integer identifier. Used in the self-referencing org chart hierarchy.",
+    ("DimEmployee", "EmployeeID"):      "Human-readable display code (e.g., EMP-FIN-0042).",
+    ("DimEmployee", "FullName"):        "First and last name of the employee.",
+    ("DimEmployee", "JobTitle"):        "Current job title (e.g., Senior Financial Analyst).",
+    ("DimEmployee", "JobGrade"):        "Seniority grade from L1 (entry-level) to L8 (C-suite).",
+    ("DimEmployee", "JobFamily"):       "Broad functional area — Finance, Sales, Operations, Technology, HR, or Legal.",
+    ("DimEmployee", "EmploymentType"):  "Contract arrangement — Full-Time, Part-Time, Contract, or Intern.",
+    ("DimEmployee", "JoiningDate"):     "Date the employee joined the company.",
+    ("DimEmployee", "AnnualBaseSalary"):"Annual basic salary in reporting currency.",
+    ("DimEmployee", "Status"):          "Current employment status — Active, On Leave, Resigned, or Terminated.",
+    # FactFinancial
+    ("FactFinancial", "Date"):          "First day of the month this row represents. All rows are monthly summaries.",
+    ("FactFinancial", "Amount"):        "The financial amount for this combination of account, business unit, geography, and month. Derived by aggregating the source transaction table.",
+    ("FactFinancial", "DataType"):      "Historical for 2020–2025 rows; Predicted for 2026 rows based on trend extrapolation.",
+    ("FactFinancial", "SourceTable"):   "The source transaction table this row was aggregated from. Used for drill-through in Inforiver reports.",
+    # FactPlan
+    ("FactPlan", "Date"):           "First day of the month this planning row represents.",
+    ("FactPlan", "PlanAmount"):     "The planned, forecast, or revised forecast amount for this account and period.",
+    ("FactPlan", "ApprovalStatus"): "Workflow state of this planning submission — Draft, Submitted, or Approved.",
+    # FactSalesOrder / FactInvoiceLine
+    ("FactSalesOrder", "OrderDate"):     "Calendar date the order was placed. Daily grain.",
+    ("FactSalesOrder", "Quantity"):      "Number of units, licences, or service hours sold on this line.",
+    ("FactSalesOrder", "GrossAmount"):   "Total amount before discount — Quantity × Unit Price.",
+    ("FactSalesOrder", "DiscountPct"):   "Discount percentage applied to this line as a proportion (e.g., 0.10 = 10%).",
+    ("FactSalesOrder", "NetAmount"):     "Revenue recognised after discount. This value feeds the revenue P&L lines.",
+    ("FactSalesOrder", "PaymentStatus"): "Current payment state — Paid, Outstanding, or Overdue.",
+    # FactPayroll
+    ("FactPayroll", "Date"):             "Payroll processing date — first of the month.",
+    ("FactPayroll", "GrossEarnings"):    "Total employee earnings — Basic Salary + Variable Pay + Overtime + Allowances.",
+    ("FactPayroll", "NetPay"):           "Amount transferred to the employee — Gross Earnings minus all deductions.",
+    ("FactPayroll", "TotalEmployerCost"):"Total cost to the company — Gross Earnings plus all employer contributions. This value feeds the staff cost P&L lines.",
+    ("FactPayroll", "CostCategory"):     "Determines which P&L account this employee's cost maps to — Direct Labor (COGS), Sales Staff, Support Staff, or Management (OPEX).",
+    # FactClinicalTrial
+    ("FactClinicalTrial", "Date"):             "First day of the month this trial activity is reported for.",
+    ("FactClinicalTrial", "TrialCost"):        "Total clinical trial expenditure in this period.",
+    ("FactClinicalTrial", "PatientEnrollment"):"Patients enrolled in this trial during the period.",
+    ("FactClinicalTrial", "SiteCount"):        "Number of active trial sites during the period.",
+    ("FactClinicalTrial", "TrialPhaseGroup"):  "Phase grouping — Discovery, Pre-Clinical, or Clinical (Phase I/II/III).",
+    # FactDepreciation
+    ("FactDepreciation", "Date"):                       "First day of the month for this depreciation charge.",
+    ("FactDepreciation", "DepreciationAmount"):          "Monthly depreciation charge for this asset. Feeds the depreciation P&L line.",
+    ("FactDepreciation", "AccumulatedDepreciation"):     "Total depreciation charged on this asset from acquisition to this month.",
+    ("FactDepreciation", "NetBookValue"):                "Asset's carrying value at month end — Acquisition Cost minus Accumulated Depreciation.",
+    # FactExpenseClaim
+    ("FactExpenseClaim", "ClaimDate"):       "Date the expense was incurred.",
+    ("FactExpenseClaim", "ExpenseCategory"): "High-level category — Travel, Meals, Accommodation, Marketing, Training, or Office.",
+    ("FactExpenseClaim", "Amount"):          "Original claim amount in the currency it was incurred.",
+    ("FactExpenseClaim", "ReportingAmount"): "Amount converted to reporting currency. This value feeds the OPEX P&L lines.",
+    ("FactExpenseClaim", "ApprovalStatus"):  "Current workflow status — Pending, Approved, or Rejected.",
+    ("FactExpenseClaim", "PolicyCompliant"): "Yes if the claim is within company expense policy limits.",
+    # FactJournalEntry
+    ("FactJournalEntry", "Date"):           "First day of the month this journal entry was posted.",
+    ("FactJournalEntry", "JournalType"):    "Nature of the posting — Accrual, Provision, Adjustment, Interest, FX, or Amortisation.",
+    ("FactJournalEntry", "Description"):    "Plain English description of what this entry represents.",
+    ("FactJournalEntry", "Amount"):         "Monetary value of this journal entry. Feeds directly to FactFinancial for the corresponding account.",
+    ("FactJournalEntry", "IsRecurring"):    "Yes if this is a standing monthly entry. No for one-off postings.",
+    # FactMacroEventImpact
+    ("FactMacroEventImpact", "Date"):          "First day of the month this impact is measured.",
+    ("FactMacroEventImpact", "ImpactAmount"):  "Estimated monetary impact of this event on this account in this month.",
+    ("FactMacroEventImpact", "ImpactPct"):     "The impact as a percentage of the baseline amount for this account and period.",
+    ("FactMacroEventImpact", "IntensityLevel"):"Severity in this specific month — Light, Moderate, or Severe.",
+    # DimMacroEvent
+    ("DimMacroEvent", "EventName"):             "Full descriptive name (e.g., COVID-19 Global Pandemic, IRA Drug Pricing Reform).",
+    ("DimMacroEvent", "EventCategory"):         "Type — Pandemic, Geopolitical, Regulatory, Commodity, Demand Shift, or Natural Disaster.",
+    ("DimMacroEvent", "ShockMultiplier"):        "Peak revenue or cost multiplier applied (e.g., -0.45 means 45% reduction at peak).",
+    ("DimMacroEvent", "RecoveryMonths"):         "Number of months from peak impact to normalisation. 0 means the shift was permanent.",
+    ("DimMacroEvent", "IndustryImpactSummary"):  "Specific impact on this industry with quantified figures from industry reports.",
+    # DimProduct
+    ("DimProduct", "ProductKey"):   "Unique integer identifier used in the product hierarchy and as FK in sales facts.",
+    ("DimProduct", "ProductCode"):  "Alphanumeric code assigned to leaf products only. Used in SuperFilter regex matching.",
+    ("DimProduct", "ProductName"):  "Name of the category, sub-category, or individual product.",
+    ("DimProduct", "ProductLevel"): "Position in the hierarchy — Category, Sub-Category, or Product.",
+    ("DimProduct", "IsLeafNode"):   "Yes for individual product nodes that appear in sales and operational facts.",
+    ("DimProduct", "BasePrice"):    "Standard selling price per unit at the leaf product level.",
+    ("DimProduct", "StandardCost"): "Standard cost per unit used for margin calculations.",
+    ("DimProduct", "IsActive"):     "Yes if the product is currently sold; No if discontinued.",
+    # DimGeography
+    ("DimGeography", "GeographyKey"):   "Unique integer identifier. All fact tables store the lowest applicable geography.",
+    ("DimGeography", "GeographyName"):  "Name of the region, country, state, or city.",
+    ("DimGeography", "GeographyLevel"): "Position in the hierarchy — Region, Country, State, or City.",
+    ("DimGeography", "ISOCountryCode"): "Two-letter ISO 3166 country code. Populated at country level and below.",
+    ("DimGeography", "Latitude"):       "Approximate centre-point latitude. Used for map visuals.",
+    ("DimGeography", "Longitude"):      "Approximate centre-point longitude. Used for map visuals.",
+    ("DimGeography", "CurrencyCode"):   "Default reporting currency for this geography.",
+    # DimAsset
+    ("DimAsset", "AssetKey"):             "Unique integer identifier for this asset in the fixed asset register.",
+    ("DimAsset", "AssetCode"):            "Alphanumeric code for the asset. Leaf assets only.",
+    ("DimAsset", "AssetName"):            "Name of the asset category, sub-category, or individual asset.",
+    ("DimAsset", "AssetType"):            "Classification — Tangible (physical), Intangible (software/IP), or Right-Of-Use (lease).",
+    ("DimAsset", "AcquisitionDate"):      "Date the asset was purchased or put into service.",
+    ("DimAsset", "AcquisitionCost"):      "Original cost of the asset at acquisition.",
+    ("DimAsset", "UsefulLifeMonths"):     "Expected useful life in months. Used to compute monthly depreciation.",
+    ("DimAsset", "DepreciationMethod"):   "Accounting method — Straight-Line, Declining Balance, or Units of Production.",
+    ("DimAsset", "DepreciationPerMonth"): "Pre-computed monthly depreciation charge.",
+    ("DimAsset", "IsActive"):             "Yes if the asset is currently in service. No if disposed or retired.",
+}
+
+# ── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
+
+def rename_column(raw_col):
+    """Convert PascalCase / camelCase column name to display name with spaces."""
+    import re
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', raw_col)
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s)
+    return s.strip()
+
+
+def should_hide_column(raw_col):
+    """Return True for FK keys, hierarchy paths, and internal technical columns."""
+    ALWAYS_HIDE = {
+        "AccountKey","ParentAccountKey","BusinessUnitKey","ParentBusinessUnitKey",
+        "DepartmentKey","ParentDepartmentKey","GeographyKey","ParentGeographyKey",
+        "ScenarioKey","ProductKey","ParentProductKey","EmployeeKey","ManagerEmployeeKey",
+        "CustomerKey","ParentCustomerKey","SupplierKey","ParentSupplierKey",
+        "AssetKey","ParentAssetKey","EventKey","TrialKey","SalesRepKey","VendorKey",
+        "LocationKey","Level1Key","Level2Key","Level3Key","Level4Key","Level5Key",
+        "OrgLevel1Key","OrgLevel2Key","OrgLevel3Key","OrgLevel4Key","OrgLevel5Key",
+        "SignConvention","NormalBalance","LinkedProductKey","LinkedBusinessUnitKey",
+        "AccountHierarchyPath","BUHierarchyPath","DeptHierarchyPath","OrgHierarchyPath",
+        "CustomerHierarchyPath","SupplierHierarchyPath","ProductHierarchyPath",
+        "GeographyHierarchyPath","AssetHierarchyPath",
+    }
+    if raw_col in ALWAYS_HIDE:
+        return True
+    lc = raw_col.lower()
+    if lc.endswith("key"):
+        return True
+    if "hierarchypath" in lc or "hierarchydepth" in lc:
+        return True
+    if lc in ("budepth","deptdepth","orgdepth","customerdepth","supplierdepth",
+              "productdepth","geographydepth","assetdepth","accountdepth"):
+        return True
+    return False
+
+
+def infer_data_type(raw_col):
+    """
+    Infer the Tabular Model dataType from the column name.
+    Reads column name patterns — never guesses from pandas dtype (which defaults
+    to object/string when reading 0 data rows, causing every column to be typed
+    as string regardless of content).
+
+    Return values match Tabular Model type strings:
+        "int64"    — integers, keys, counts, year/month numbers
+        "double"   — decimals, amounts, rates, percentages, coordinates
+        "dateTime" — date and datetime columns
+        "boolean"  — yes/no flag columns
+        "string"   — all others
+    """
+    c = raw_col.lower().strip()
+
+    # ── Integer: all FK and PK keys ─────────────────────────────────────────
+    if c.endswith("key"):
+        return "int64"
+
+    # ── Integer: exact column names ──────────────────────────────────────────
+    INT_EXACT = {
+        "yearmonth","year","calendaryear","fiscalyear",
+        "quarternumber","fiscalquarter","calendarquarter",
+        "monthnumber","monthnum","weeknumber","dayofweek","dayofmonth","dayofyear",
+        "accountdepth","accountlevel","accountlevelnum",
+        "businessunitdepth","businessunitlevelnum",
+        "departmentdepth","departmentlevelnum",
+        "geographydepth","geographylevelnum",
+        "productdepth","productlevelnum",
+        "customerdepth","customerlevelnum",
+        "supplierdepth","supplierlevelnum",
+        "assetdepth","assetlevelnum",
+        "orgdepth","jobradenum","orgleveldepth",
+        "sortorder","usefullifemonths","paymenttermsdays",
+        "leadtimedays","recoverymonths","enrollmenttarget",
+        "sitecount","elapsed","remaining",
+    }
+    if c in INT_EXACT:
+        return "int64"
+
+    # ── DateTime: columns whose name ends with "date" or matches known date cols ─
+    DATE_EXACT = {
+        "date","fulldate","orderdate","invoicedate","duedate","deliverydate",
+        "claimdate","maintenancedate","acquisitiondate","disposaldate",
+        "joiningdate","confirmationdate","exitdate","contractstartdate",
+        "contractenddate","publisheddate","startdate","enddate",
+        "peakimpactdate","recoverydate","estimatedenddate","transactiondate",
+    }
+    if c in DATE_EXACT:
+        return "dateTime"
+    if c.endswith("date") and "update" not in c and "candidate" not in c:
+        return "dateTime"
+
+    # ── Boolean: yes/no flag columns ─────────────────────────────────────────
+    BOOL_EXACT = {
+        "isweekend","ismonthend","isleafnode","isleaf","iscalculated",
+        "isnewcustomer","ischurn","isrecurring","isactive","isongoing",
+        "bonuseligible","cashnononcash","profitcentre","policycomplement",
+    }
+    if c in BOOL_EXACT:
+        return "boolean"
+    if c.startswith("is") and len(c) > 4:
+        return "boolean"
+
+    # ── Double: any column whose name contains a numeric-value keyword ────────
+    NUMERIC_SUBSTRINGS = [
+        "amount","cost","price","revenue","salary","earnings","pay",
+        "profit","margin","income","expense","rate","pct","percent",
+        "ratio","multiplier","latitude","longitude","taxrate",
+        "discount","quantity","units","volume","weight","area","sqft",
+        "value","balance","budget","target","baseprice","standardcost",
+        "residualvalue","acquisitioncost","creditlimit","annualcontract",
+        "annualspend","annualbas","variablepay","benefitscost",
+        "shockmultiplier","taxable","taxamount","depreciation","netbook",
+        "enrollment","trialcost","totalcost","laborcost","partscost",
+        "downtimehours","grossearning","netsalary","grosspay","netpay",
+        "allowance","deduction","contribution","commission","bonus",
+        "freight","premium","claim","royalt","interest","dividend",
+        "arpu","mrr","arr","cac","ltv","adr","revpar","goppar","nim",
+        "oee","utilisation","utilization","occupancy","throughput",
+        "coverage","allocation","penetration","retention","churn",
+    ]
+    for sub in NUMERIC_SUBSTRINGS:
+        if sub in c:
+            return "double"
+
+    return "string"
+
+
+# ── HIERARCHY DEFINITIONS ─────────────────────────────────────────────────────
+# Hierarchies are added to dimension tables only.
+# Name convention: "[H] Hierarchy Name" — the [H] prefix makes them easy to
+# identify in the Power BI field list and distinguishes them from columns.
+# Each level references the DISPLAY column name (post-rename), not the raw name.
+# Levels are listed from broadest (ordinal 0) to most granular (last ordinal).
+
+HIERARCHY_DEFINITIONS = {
+
+    "[Dim] Account": [
+        {
+            "name": "[H] Account Hierarchy",
+            "description": "P&L drill-down from top-level category to individual posting account. Use in Matrix visuals for Income Statement and variance reports.",
+            "levels": [
+                {"name": "P&L Category",    "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Account Group",   "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Account",         "ordinal": 2, "column": "Account Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Product": [
+        {
+            "name": "[H] Product Hierarchy",
+            "description": "Product drill-down from Category to individual Product. Use in revenue mix and Pareto analysis visuals.",
+            "levels": [
+                {"name": "Category",        "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Sub-Category",    "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Product",         "ordinal": 2, "column": "Product Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Geography": [
+        {
+            "name": "[H] Geography",
+            "description": "Location drill-down from global Region to City. Use in map visuals and regional performance analysis.",
+            "levels": [
+                {"name": "Region",          "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Country",         "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "State",           "ordinal": 2, "column": "Level 3 Name"},
+                {"name": "City",            "ordinal": 3, "column": "Level 4 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Date": [
+        {
+            "name": "[H] Date",
+            "description": "Standard calendar drill-down from Year to individual Date. Use in all time-series visuals and period slicers.",
+            "levels": [
+                {"name": "Year",            "ordinal": 0, "column": "Calendar Year"},
+                {"name": "Quarter",         "ordinal": 1, "column": "Quarter Label"},
+                {"name": "Month",           "ordinal": 2, "column": "Month Short Name"},
+                {"name": "Date",            "ordinal": 3, "column": "Full Date"},
+            ]
+        },
+        {
+            "name": "[H] Fiscal Date",
+            "description": "Fiscal calendar drill-down from Fiscal Year to Month. Use when the company's financial year differs from the calendar year.",
+            "levels": [
+                {"name": "Fiscal Year",     "ordinal": 0, "column": "Fiscal Year"},
+                {"name": "Fiscal Quarter",  "ordinal": 1, "column": "Fiscal Quarter"},
+                {"name": "Fiscal Month",    "ordinal": 2, "column": "Month Short Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Business Unit": [
+        {
+            "name": "[H] Business Unit",
+            "description": "Organisational drill-down from Company to Division. Use in P&L slicing and cost centre analysis.",
+            "levels": [
+                {"name": "Company",         "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Business Unit",   "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Division",        "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Department": [
+        {
+            "name": "[H] Department",
+            "description": "Cost centre drill-down from Division to Team. Use in payroll and expense analysis.",
+            "levels": [
+                {"name": "Division",        "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Department",      "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Team",            "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Customer": [
+        {
+            "name": "[H] Customer",
+            "description": "Customer drill-down from Parent Company to billing entity. Use in revenue by customer and contract analysis.",
+            "levels": [
+                {"name": "Parent Company",  "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Subsidiary",      "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Customer",        "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Supplier": [
+        {
+            "name": "[H] Supplier",
+            "description": "Supplier drill-down from Parent Group to transacting unit. Use in procurement spend and supplier concentration analysis.",
+            "levels": [
+                {"name": "Parent Group",    "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Subsidiary",      "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Supplier",        "ordinal": 2, "column": "Level 3 Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Asset": [
+        {
+            "name": "[H] Asset",
+            "description": "Fixed asset drill-down from Asset Category to individual asset. Use in depreciation schedule and maintenance cost analysis.",
+            "levels": [
+                {"name": "Asset Category",  "ordinal": 0, "column": "Level 1 Name"},
+                {"name": "Sub-Category",    "ordinal": 1, "column": "Level 2 Name"},
+                {"name": "Asset",           "ordinal": 2, "column": "Asset Name"},
+            ]
+        }
+    ],
+
+    "[Dim] Employee": [
+        {
+            "name": "[H] Organisation Chart",
+            "description": "Reporting line drill-down from C-suite to individual employee. Use in headcount, payroll, and span-of-control analysis.",
+            "levels": [
+                {"name": "Executive",       "ordinal": 0, "column": "Org Level 1 Name"},
+                {"name": "Senior Leader",   "ordinal": 1, "column": "Org Level 2 Name"},
+                {"name": "Manager",         "ordinal": 2, "column": "Org Level 3 Name"},
+                {"name": "Team Lead",       "ordinal": 3, "column": "Org Level 4 Name"},
+                {"name": "Employee",        "ordinal": 4, "column": "Full Name"},
+            ]
+        }
+    ],
+}
+
+
+def build_hierarchies(display_table_name, column_display_names):
+    """
+    Returns the hierarchy list for a given table, filtering out levels whose
+    column does not exist in the table's actual column set.
+    Only hierarchies where ALL levels are present are included.
+
+    Args:
+        display_table_name : e.g. "[Dim] Account"
+        column_display_names: set of display column names for this table
+
+    Returns:
+        list of hierarchy dicts (may be empty if no definitions exist)
+    """
+    if display_table_name not in HIERARCHY_DEFINITIONS:
+        return []
+
+    result = []
+    for hier in HIERARCHY_DEFINITIONS[display_table_name]:
+        # Check every level's column exists in the table
+        all_present = all(
+            lvl["column"] in column_display_names
+            for lvl in hier["levels"]
+        )
+        if not all_present:
+            # Try to find the column with a case-insensitive match
+            missing = [
+                lvl["column"] for lvl in hier["levels"]
+                if lvl["column"] not in column_display_names
+            ]
+            # Skip hierarchy if more than one level is missing
+            if len(missing) > 1:
+                continue
+            # If only one level is missing, it may be a name mismatch —
+            # skip that level (hierarchy still valid with fewer levels)
+            hier = dict(hier)
+            hier["levels"] = [
+                lvl for lvl in hier["levels"]
+                if lvl["column"] in column_display_names
+            ]
+        result.append({
+            "name":        hier["name"],
+            "description": hier["description"],
+            "levels": [
+                {
+                    "name":    lvl["name"],
+                    "ordinal": lvl["ordinal"],
+                    "column":  lvl["column"]
+                }
+                for lvl in hier["levels"]
+            ]
+        })
+    return result
+
+
+# ── SORT-BY-COLUMN RULES ──────────────────────────────────────────────────────
+# Power BI sorts string columns alphabetically by default. For label columns
+# (Month Short Name, Quarter Label, Account Name in P&L order, etc.), this is
+# wrong. The "sortByColumn" property tells Power BI to display values in the
+# order of a different column — almost always a numeric one.
+#
+# Rules use DISPLAY column names (post-rename). Key entries:
+#   - Month Short Name / Month Name → Month Number (so Jan, Feb, Mar... not Apr, Aug, Dec)
+#   - Quarter Label                 → Calendar Quarter
+#   - Year Month Label              → Year Month
+#   - Day Name                      → Day Of Week
+#   - Account Name                  → Sort Order (P&L order: Revenue first, then COGS...)
+#   - Level N Name                  → Level N Key (hierarchy ordering)
+#   - Scenario Name                 → Sort Order
+#
+# Sort rules are applied only when BOTH columns exist in the table.
+
+SORT_RULES = {
+
+    "[Dim] Date": [
+        # Format: (column_to_sort, sort_by_column)
+        ("Month Short Name",     "Month Number"),
+        ("Month Name",           "Month Number"),
+        ("Quarter Label",        "Calendar Quarter"),
+        ("Year Month Label",     "Year Month"),
+        ("Day Name",             "Day Of Week"),
+        ("Fiscal Month",         "Fiscal Month"),
+        ("Fiscal Quarter Label", "Fiscal Quarter"),
+    ],
+
+    "[Dim] Account": [
+        ("Account Name",         "Sort Order"),
+        ("Account Short Name",   "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Product": [
+        ("Product Name",         "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Geography": [
+        ("Geography Name",       "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+        ("Level 4 Name",         "Level 4 Key"),
+    ],
+
+    "[Dim] Business Unit": [
+        ("Business Unit Name",   "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Department": [
+        ("Department Name",      "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Customer": [
+        ("Customer Name",        "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Supplier": [
+        ("Supplier Name",        "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+        ("Level 3 Name",         "Level 3 Key"),
+    ],
+
+    "[Dim] Asset": [
+        ("Asset Name",           "Sort Order"),
+        ("Level 1 Name",         "Level 1 Key"),
+        ("Level 2 Name",         "Level 2 Key"),
+    ],
+
+    "[Dim] Scenario": [
+        ("Scenario Name",        "Sort Order"),
+    ],
+
+    "[Dim] Employee": [
+        ("Job Grade",            "Job Grade Num"),
+        ("Org Level 1 Name",     "Org Level 1 Key"),
+        ("Org Level 2 Name",     "Org Level 2 Key"),
+        ("Org Level 3 Name",     "Org Level 3 Key"),
+        ("Org Level 4 Name",     "Org Level 4 Key"),
+    ],
+
+    "[Dim] Macro Event": [
+        ("Event Name",           "Start Date"),
+        ("Intensity",            "Shock Multiplier"),
+    ],
+}
+
+
+def detect_generic_sort_relationships(column_names_set):
+    """
+    Pattern-based detection of sort relationships for ANY dataset.
+    Used as a fallback when the table is not in SORT_RULES.
+
+    Detection patterns:
+        - "X Label"      → "X Number" / "X Key" / "X"
+        - "X Name"       → "X Number" / "X Key" (only if "X" is time-related)
+        - "X Short Name" → "X Number"
+        - Any string column that has a corresponding "Sort Order" column → Sort Order
+
+    Returns a list of (target_col, sort_col) tuples valid against the given column set.
+    """
+    pairs   = []
+    cols_lc = {c.lower(): c for c in column_names_set}
+
+    # Time-related prefixes that warrant a Name → Number / Key sort
+    TIME_TOKENS = ("month", "quarter", "day", "week", "year", "fiscal")
+
+    for col in column_names_set:
+        col_lower = col.lower()
+
+        # X Label → X Number / X Key / X
+        if col_lower.endswith(" label"):
+            base = col_lower[:-len(" label")]
+            for cand in (f"{base} number", f"{base} num", f"{base} key", base):
+                if cand in cols_lc and cols_lc[cand] != col:
+                    pairs.append((col, cols_lc[cand]))
+                    break
+
+        # X Short Name → X Number  (e.g. Month Short Name → Month Number)
+        elif col_lower.endswith(" short name"):
+            base = col_lower[:-len(" short name")]
+            for cand in (f"{base} number", f"{base} num"):
+                if cand in cols_lc:
+                    pairs.append((col, cols_lc[cand]))
+                    break
+
+        # X Name → X Number / X Key  (only for time-related prefixes)
+        elif col_lower.endswith(" name"):
+            base = col_lower[:-len(" name")]
+            if any(base.startswith(t) for t in TIME_TOKENS):
+                for cand in (f"{base} number", f"{base} num", f"{base} key"):
+                    if cand in cols_lc:
+                        pairs.append((col, cols_lc[cand]))
+                        break
+
+    return pairs
+
+
+def apply_sort_by_columns(display_table_name, columns):
+    """
+    Sets the sortByColumn property on every column that has a defined sort rule.
+    Modifies the columns list in place.
+
+    Resolution order:
+        1. SORT_RULES dict — explicit, table-specific rules
+        2. detect_generic_sort_relationships — pattern-based fallback
+
+    A sort rule is applied only when both columns exist in the table.
+    Self-references (sorting a column by itself) are silently skipped.
+    """
+    col_names = {c["name"] for c in columns}
+    col_index = {c["name"]: c for c in columns}
+
+    # Build the combined rule list — explicit first, generic for any leftover
+    rules = list(SORT_RULES.get(display_table_name, []))
+    explicit_targets = {target for target, _ in rules}
+    for tgt, src in detect_generic_sort_relationships(col_names):
+        if tgt not in explicit_targets:
+            rules.append((tgt, src))
+
+    applied = 0
+    for target_col, sort_col in rules:
+        if target_col == sort_col:
+            continue                                      # self-reference
+        if target_col in col_index and sort_col in col_names:
+            col_index[target_col]["sortByColumn"] = sort_col
+            applied += 1
+    return applied
+
+
+    """Returns the best available description for a table."""
+    # Priority 1 — internal doc
+    if raw_name in internal_descs:
+        desc = internal_descs.get(raw_name, "")
+        if desc:
+            return desc
+    # Priority 2 — public doc
+    if raw_name in public_descs:
+        desc = public_descs.get(raw_name, "")
+        if desc:
+            return desc
+    # Priority 3 — built-in catalogue
+    if raw_name in builtin_descs:
+        return builtin_descs[raw_name]
+    # Priority 4 — auto-generate from name
+    return f"Data table: {rename_column(raw_name)}."
+
+
+# ── STEP 2: BUILD TABLE DEFINITIONS ─────────────────────────────────────────
+def build_table(raw_name, display_name, columns_raw):
+    columns = []
+    for raw_col in columns_raw:
+        display_col = rename_column(raw_col)
+        desc        = resolve_description(raw_col, raw_name,
+                                          internal_descs, public_descs, BUILTIN_COL_DESCS)
+        col_type    = infer_data_type(raw_col)     # uses pattern-matching, not pandas dtype
+        is_hidden   = should_hide_column(raw_col)
+        columns.append({
+            "name":         display_col,
+            "description":  desc,
+            "dataType":     col_type,
+            "sourceColumn": raw_col,
+            "isHidden":     is_hidden,
+            "annotations":  [
+                {"name": "SummarizationSetBy", "value": "User"}
+            ]
+        })
+
+    # Build hierarchy list — only dim tables have definitions
+    col_display_set = {c["name"] for c in columns}
+    hierarchies     = build_hierarchies(display_name, col_display_set)
+
+    # Apply sortByColumn rules — adds "sortByColumn" to columns where applicable
+    # Validates against actual columns present; pattern-detects additional rules
+    # for tables not in SORT_RULES so the skill works for any dataset.
+    apply_sort_by_columns(display_name, columns)
+
+    table_desc = resolve_table_description(raw_name, internal_descs,
+                                           public_descs, BUILTIN_TABLE_DESCS)
+    table_obj = {
+        "name":        display_name,
+        "description": table_desc,
+        "columns":     columns,
+        "partitions": [{
+            "name":     display_name,
+            "dataView": "full",
+            "source": {
+                "type": "m",
+                "expression": [
+                    "let",
+                    f'    Source = Csv.Document( File.Contents( DatasetFolder & "\\\\{raw_name}.csv" ),',
+                    '        [ Delimiter = ",", Columns = null, Encoding = 65001, QuoteStyle = QuoteStyle.None ] ),',
+                    '    #"Promoted Headers" = Table.PromoteHeaders( Source, [ PromoteAllScalars = true ] )',
+                    "in",
+                    '    #"Promoted Headers"'
+                ]
+            }
+        }],
+        "annotations": [
+            {"name": "PBI_ResultType", "value": "Table"}
+        ]
+    }
+    # Only add "hierarchies" key when at least one hierarchy was resolved
+    if hierarchies:
+        table_obj["hierarchies"] = hierarchies
+    return table_obj
+
+
+def build_dataset_folder_expression():
+    """
+    Builds the DatasetFolder M parameter expression.
+    This is a required root-level expression in every BIM.
+    The user updates the path string after deployment.
+
+    CORRECT syntax (verified against Power BI Desktop):
+      "expression" is a plain string — NOT an array, NOT wrapped in let/in.
+      Path uses double-escaped backslashes in the JSON string.
+      The meta annotation must follow immediately after the closing quote.
+    """
+    return {
+        "name": "DatasetFolder",
+        "description": "Path to the folder containing all CSV files. Update this path before deploying.",
+        "kind": "m",
+        "expression": '"C:\\\\Users\\\\YourName\\\\Desktop\\\\Dataset" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]'
+    }
+
+
+# ── DATE TABLE — ENRICHED M EXPRESSION ──────────────────────────────────────
+# The Date table does NOT use the simple CSV load partition that every other
+# table uses. Instead, it uses an enriched Power Query M expression that:
+#   - Reads only the Date column from DimDate.csv
+#   - Removes all other CSV columns (they are regenerated from the Date value)
+#   - Generates ~33 columns from the single Date column
+#   - Includes offsets (Day Offset, Month Offset, Quarter Offset, Year Offset)
+#   - Includes period boundaries (Start/End of Year, Month, Quarter, Week)
+#   - Includes HalfYear, DayType, and Prev Day
+#
+# This M expression is the ONLY correct partition source for the Date table.
+# Using the simple CSV load will result in a Date table with raw CSV columns
+# that don't include offsets, period boundaries, or calculated fields.
+#
+# The expression uses "DatasetFolder" — NOT "DataFolderPath" — to match the
+# DatasetFolder parameter defined in build_dataset_folder_expression().
+#
+# © 2026 Logeshkumar Sivakumar. All rights reserved. elogu2001@outlook.com
+
+def build_date_table_partition_m():
+    """
+    Returns the enriched M expression for the Date table partition.
+    This expression generates all date columns from a single Date column
+    in DimDate.csv.
+    """
+    return [
+        'let',
+        '    Source = Csv.Document(File.Contents(DatasetFolder & "\\\\DimDate.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.None]),',
+        '    #"Promoted Headers" = Table.PromoteHeaders( Source, [ PromoteAllScalars = true ] ),',
+        '    #"Removed Columns1" = Table.RemoveColumns(#"Promoted Headers", List.RemoveItems(Table.ColumnNames(#"Promoted Headers"), {"Date"})),',
+        '    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns1",{{"Date", "DateValue"}}),',
+        '    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"DateValue", type date}}),',
+        '    #"Inserted year" = Table.AddColumn(#"Changed Type", "Year", each Date.Year([DateValue]), type nullable number),',
+        '    #"Inserted month" = Table.AddColumn(#"Inserted year", "Month", each Text.PadStart(Text.From(Date.Month([DateValue])), 2, "0"), type nullable number),',
+        '    #"Inserted day" = Table.AddColumn(#"Inserted month", "Day", each Text.PadStart(Text.From(Date.Day([DateValue])), 2, "0"), type nullable number),',
+        '    #"Inserted quarter" = Table.AddColumn(#"Inserted day", "Quarter", each Text.PadStart(Text.From(Date.QuarterOfYear([DateValue])), 2, "0"), type nullable number),',
+        '    #"Inserted days in month" = Table.AddColumn(#"Inserted quarter", "Days in Month", each Date.DaysInMonth([DateValue]), type nullable number),',
+        '    #"Added custom" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted days in month", "Year Month Number", each Text.PadStart(Text.From([Year]), 0, "0") & Text.PadStart(Text.From([Month]), 2, "0")), {{"Year Month Number", type text}}),',
+        '    #"Inserted day name" = Table.AddColumn(#"Added custom", "Day Name", each Date.DayOfWeekName([DateValue]), type nullable text),',
+        '    #"Inserted first characters" = Table.AddColumn(#"Inserted day name", "Day Name Short", each Text.Start([Day Name], 3), type text),',
+        '    #"Inserted day of week" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted first characters", "Day of Week", each Date.DayOfWeek([DateValue], Day.Sunday)+1), {{"Day of Week", type number}}),',
+        '    #"Inserted day of year" = Table.AddColumn(#"Inserted day of week", "Day of Year", each Text.PadStart(Text.From(Date.DayOfYear([DateValue])), 3, "0"), type nullable number),',
+        '    #"Inserted month name" = Table.AddColumn(#"Inserted day of year", "Month Name", each Date.MonthName([DateValue]), type nullable text),',
+        '    #"Inserted first characters 1" = Table.AddColumn(#"Inserted month name", "Month Name Short", each Text.Start([Month Name], 3), type text),',
+        '    #"Added custom 1" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted first characters 1", "Year Month Name", each Text.PadStart(Text.From([Year]), 0, "0") & " " & [Month Name Short]), {{"Year Month Name", type text}}),',
+        '    #"Added custom 2" = Table.TransformColumnTypes(Table.AddColumn(#"Added custom 1", "Quarter Name", each "Q" & Text.PadStart(Text.From(Date.QuarterOfYear([DateValue])), 0, "0")), {{"Quarter Name", type text}}),',
+        '    #"Inserted merged column" = Table.AddColumn(#"Added custom 2", "Year Quarter Number", each Text.Combine({Text.From([Year]), Text.From([Quarter])}, ""), type text),',
+        '    #"Added custom 3" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted merged column", "Year Quarter Name", each Text.PadStart(Text.From([Year]), 0, "0") & " " & [Quarter Name]), {{"Year Quarter Name", type text}}),',
+        '    #"Inserted week of year" = Table.AddColumn(#"Added custom 3", "Week of year", each Text.PadStart(Text.From(Date.WeekOfYear([DateValue])), 2, "0"), type nullable number),',
+        '    #"Added custom 4" = Table.TransformColumnTypes(Table.AddColumn(#"Inserted week of year", "Today", each DateTime.LocalNow()), {{"Today", type date}}),',
+        '    #"Added custom 5" = Table.TransformColumnTypes(Table.AddColumn(#"Added custom 4", "Day Offset", each Duration.Days([DateValue] - [Today])), {{"Day Offset", Int64.Type}}),',
+        '    #"Inserted division" = Table.AddColumn(#"Added custom 5", "Month Offset", each [Day Offset] / [Days in Month], type number),',
+        '    // NOTE: Please contact Logeshkumar Sivakumar (elogu2001@outlook.com) before making any changes',
+        '    #"Rounded off" = Table.TransformColumns(#"Inserted division", {{"Month Offset", each Number.RoundUp(_), type number}}),',
+        '    #"Inserted division 1" = Table.TransformColumnTypes(Table.AddColumn(#"Rounded off", "Quarter Offset", each [Month Offset] / 3), {{"Quarter Offset", type number}}),',
+        '    #"Rounded up" = Table.TransformColumns(#"Inserted division 1", {{"Quarter Offset", each Number.RoundUp(_), type nullable Int64.Type}}),',
+        '    #"Inserted integer-division" = Table.AddColumn(#"Rounded up", "Year Offset", each Number.IntegerDivide([Month Offset], 12), Int64.Type),',
+        '    #"Inserted start of year" = Table.AddColumn(#"Inserted integer-division", "Start of Year", each Date.StartOfYear([DateValue]), type nullable date),',
+        '    #"Inserted end of year" = Table.AddColumn(#"Inserted start of year", "End of Year", each Date.EndOfYear([DateValue]), type nullable date),',
+        '    #"Inserted start of month" = Table.AddColumn(#"Inserted end of year", "Start of Month", each Date.StartOfMonth([DateValue]), type nullable date),',
+        '    #"Inserted end of month" = Table.AddColumn(#"Inserted start of month", "End of Month", each Date.EndOfMonth([DateValue]), type nullable date),',
+        '    #"Inserted start of quarter" = Table.AddColumn(#"Inserted end of month", "Start of quarter", each Date.StartOfQuarter([DateValue]), type nullable date),',
+        '    #"Inserted end of quarter" = Table.AddColumn(#"Inserted start of quarter", "End of quarter", each Date.EndOfQuarter([DateValue]), type nullable date),',
+        '    #"Inserted start of week" = Table.AddColumn(#"Inserted end of quarter", "Start of week", each Date.StartOfWeek([DateValue]), type nullable date),',
+        '    // NOTE: Please contact Logeshkumar Sivakumar (elogu2001@outlook.com) before making any changes',
+        '    #"Inserted end of week" = Table.AddColumn(#"Inserted start of week", "End of week", each Date.EndOfWeek([DateValue]), type nullable date),',
+        '    #"Inserted conditional column" = Table.AddColumn(#"Inserted end of week", "HalfYear", each if [Quarter Name] = "Q1" then "H1" else if [Quarter Name] = "Q2" then "H1" else "H2"),',
+        '    #"Inserted conditional column 1" = Table.AddColumn(#"Inserted conditional column", "DayType", each if [Day Name] = "Saturday" then "WeekEnd" else if [Day Name] = "Sunday" then "WeekEnd" else "WeekDay"),',
+        '    // NOTE: Please contact Logeshkumar Sivakumar (elogu2001@outlook.com) before making any changes',
+        '    #"Removed columns" = Table.RemoveColumns(#"Inserted conditional column 1", {"Today"}),',
+        '    #"Added Prev Day" = Table.TransformColumnTypes(Table.AddColumn(#"Removed columns", "Prev Day", each Date.AddDays([DateValue], -1)), {{"Prev Day", type date}}),',
+        '    #"Final Rename" = Table.RenameColumns(#"Added Prev Day",{{"DateValue", "Date"}})',
+        'in',
+        '    #"Final Rename"'
+    ]
+
+
+def build_date_table_columns():
+    """
+    Returns the column definitions for the enriched Date table.
+    These columns are generated by the M expression — they do NOT come from the CSV.
+    Each column has its correct dataType, description, sortByColumn, and visibility.
+    """
+    date_cols = [
+        # (name, sourceColumn, dataType, isHidden, sortByColumn, description)
+        ("Date",             "Date",             "dateTime", False, None,            "The calendar date. Primary join column to all fact tables."),
+        ("Year",             "Year",             "int64",    False, None,            "Four-digit calendar year (e.g., 2024)."),
+        ("Month",            "Month",            "string",   True,  None,            "Two-digit month number as text (01-12). Used for sorting; Month Name Short is the display column."),
+        ("Day",              "Day",              "string",   True,  None,            "Two-digit day of month as text (01-31)."),
+        ("Quarter",          "Quarter",          "string",   True,  None,            "Two-digit quarter number as text (01-04). Used for sorting; Quarter Name is the display column."),
+        ("Days in Month",    "Days in Month",    "int64",    False, None,            "Number of days in the month (28-31). Used in offset calculations."),
+        ("Year Month Number","Year Month Number","string",   True,  None,            "Year and month as YYYYMM text. Sort key for Year Month Name."),
+        ("Year Month Name",  "Year Month Name",  "string",   False, "Year Month Number", "Human-readable month label (e.g., 2024 Jan). Used on report axes."),
+        ("Day Name",         "Day Name",         "string",   False, "Day of Week",  "Full name of the weekday (e.g., Monday)."),
+        ("Day Name Short",   "Day Name Short",   "string",   False, "Day of Week",  "Three-letter weekday abbreviation (e.g., Mon)."),
+        ("Day of Week",      "Day of Week",      "int64",    True,  None,            "Day of week number (1=Sunday, 7=Saturday). Sort key for Day Name."),
+        ("Day of Year",      "Day of Year",      "string",   True,  None,            "Day number within the year (001-366) as text."),
+        ("Month Name",       "Month Name",       "string",   False, "Month",         "Full month name (e.g., January)."),
+        ("Month Name Short", "Month Name Short", "string",   False, "Month",         "Three-letter month abbreviation (e.g., Jan). Used on compact chart axes."),
+        ("Quarter Name",     "Quarter Name",     "string",   False, "Quarter",       "Quarter formatted as Q1, Q2, Q3, Q4. Used on report axes."),
+        ("Year Quarter Number","Year Quarter Number","string",True,  None,            "Year and quarter as YYYYQQ text. Sort key for Year Quarter Name."),
+        ("Year Quarter Name","Year Quarter Name", "string",   False, "Year Quarter Number", "Formatted quarter label (e.g., 2024 Q1). Used in quarterly trend visuals."),
+        ("Week of year",     "Week of year",     "string",   True,  None,            "Week number within the year (01-53) as text."),
+        ("Day Offset",       "Day Offset",       "int64",    False, None,            "Number of days from today. 0 = today, -1 = yesterday, +1 = tomorrow. Used for relative date filters."),
+        ("Month Offset",     "Month Offset",     "int64",    False, None,            "Number of months from the current month. 0 = this month, -1 = last month. Used for trailing period calculations."),
+        ("Quarter Offset",   "Quarter Offset",   "int64",    False, None,            "Number of quarters from the current quarter. 0 = this quarter."),
+        ("Year Offset",      "Year Offset",      "int64",    False, None,            "Number of years from the current year. 0 = this year, -1 = last year."),
+        ("Start of Year",    "Start of Year",    "dateTime", True,  None,            "First day of the year (Jan 1). Used in YTD calculations."),
+        ("End of Year",      "End of Year",      "dateTime", True,  None,            "Last day of the year (Dec 31)."),
+        ("Start of Month",   "Start of Month",   "dateTime", True,  None,            "First day of the month. Used in MTD calculations."),
+        ("End of Month",     "End of Month",     "dateTime", True,  None,            "Last day of the month."),
+        ("Start of quarter", "Start of quarter", "dateTime", True,  None,            "First day of the quarter. Used in QTD calculations."),
+        ("End of quarter",   "End of quarter",   "dateTime", True,  None,            "Last day of the quarter."),
+        ("Start of week",    "Start of week",    "dateTime", True,  None,            "First day of the week (Monday by default)."),
+        ("End of week",      "End of week",      "dateTime", True,  None,            "Last day of the week (Sunday by default)."),
+        ("HalfYear",         "HalfYear",         "string",   False, "Quarter",       "H1 (Q1-Q2) or H2 (Q3-Q4). Used for half-year comparisons."),
+        ("DayType",          "DayType",          "string",   False, None,            "WeekDay or WeekEnd. Used for working-day-only filters."),
+        ("Prev Day",         "Prev Day",         "dateTime", True,  None,            "The calendar date one day before the current row. Used in day-over-day change calculations."),
+    ]
+    columns = []
+    for name, src, dtype, hidden, sort_by, desc in date_cols:
+        col = {
+            "name":         name,
+            "dataType":     dtype,
+            "sourceColumn": src,
+            "isHidden":     hidden,
+            "description":  desc,
+            "annotations":  [{"name": "SummarizationSetBy", "value": "User"}]
+        }
+        if sort_by:
+            col["sortByColumn"] = sort_by
+        columns.append(col)
+    return columns
+
+
+def build_date_table_object():
+    """
+    Builds the complete [Dim] Date table object using the enriched M expression.
+    This function is called INSTEAD of build_table() when the table is DimDate.
+    """
+    columns     = build_date_table_columns()
+    col_names   = {c["name"] for c in columns}
+    hierarchies = build_hierarchies("[Dim] Date", col_names)
+
+    table_obj = {
+        "name":        "[Dim] Date",
+        "description": (
+            "Calendar reference table. The partition M expression generates all 33 "
+            "columns from a single Date column in DimDate.csv — including offsets, "
+            "period boundaries, HalfYear, DayType, and Prev Day. Every fact table "
+            "joins to this table on its date column."
+        ),
+        "columns":     columns,
+        "partitions": [{
+            "name":     "[Dim] Date",
+            "dataView": "full",
+            "source": {
+                "type": "m",
+                "expression": build_date_table_partition_m()
+            }
+        }],
+        "annotations": [
+            {"name": "PBI_ResultType", "value": "Table"}
+        ]
+    }
+    if hierarchies:
+        table_obj["hierarchies"] = hierarchies
+    return table_obj
+
+# ── STEP 3: BUILD RELATIONSHIPS ──────────────────────────────────────────────
+def build_relationships(present_tables, all_tables):
+    """
+    Builds the relationships array for the BIM.
+
+    CRITICAL — COLUMN REFERENCE RULE (verified against Tabular Editor + Power BI):
+        fromColumn and toColumn values use the column's NAME property
+        (display name after rename), NOT the sourceColumn property.
+
+        The Tabular Object Model resolves columns by their `name` field.
+        Using the sourceColumn value (e.g. "AccountKey" instead of "Account Key")
+        causes EVERY relationship to show "(none) ∞←1 (none)" in Tabular Editor
+        because no column with that name exists in the table.
+
+    SPECIAL CASE — [Dim] Date:
+        The enriched Date table M expression produces a column named "Date"
+        (not "Date Key"). So Date relationships are asymmetric:
+            fromColumn: "Date Key"  (FK in fact table, renamed from DateKey)
+            toColumn:   "Date"      (PK in enriched Date table)
+
+    VALIDATION:
+        After building each relationship, this function checks that fromColumn
+        and toColumn actually exist in their respective tables. Relationships
+        referencing non-existent columns are skipped with a warning printed
+        to the terminal.
+
+    Args:
+        present_tables: set of raw table names present in the dataset
+        all_tables:     list of built table objects (with column names)
+    """
+    # Build a lookup: table display name → set of column display names
+    table_cols = {}
+    for t in all_tables:
+        table_cols[t["name"]] = {col["name"] for col in t.get("columns", [])}
+
+    rels = []
+    skipped = 0
+    for r in UNIVERSAL_RELATIONSHIPS:
+        from_raw = reverse_display_name(r["from_table"])
+        to_raw   = reverse_display_name(r["to_table"])
+        from_ok  = from_raw in present_tables or r["from_table"] in present_tables
+        to_ok    = to_raw   in present_tables or r["to_table"]   in present_tables
+        if not (from_ok and to_ok):
+            continue
+
+        # Validate columns exist in their tables
+        from_cols = table_cols.get(r["from_table"], set())
+        to_cols   = table_cols.get(r["to_table"], set())
+        if r["from_col"] not in from_cols:
+            print(f"  ⚠️  Skipping relationship: column '{r['from_col']}' not found in {r['from_table']}  (available: {sorted(from_cols)[:5]}...)")
+            skipped += 1
+            continue
+        if r["to_col"] not in to_cols:
+            print(f"  ⚠️  Skipping relationship: column '{r['to_col']}' not found in {r['to_table']}  (available: {sorted(to_cols)[:5]}...)")
+            skipped += 1
+            continue
+
+        rels.append({
+            "name":                   f"rel_{from_raw}_{r['from_col'].replace(' ', '')}",
+            "fromTable":              r["from_table"],
+            "fromColumn":             r["from_col"],   # column NAME (display), not sourceColumn
+            "toTable":                r["to_table"],
+            "toColumn":               r["to_col"],     # column NAME (display), not sourceColumn
+            "crossFilteringBehavior": "oneDirection",
+            "isActive":               r["active"]
+        })
+    if skipped:
+        print(f"  ℹ️  {skipped} relationship(s) skipped due to missing columns")
+    print(f"  ✅ {len(rels)} relationships built")
+    return rels
+
+# ── STEP 1b: DISCOVER MEASURE VOCABULARY ────────────────────────────────────
+# Always run after schema ingestion. Reads actual values — never assumes defaults.
+
+def discover_measure_vocabulary(csv_files, mode, internal_descs):
+    """
+    Reads DimScenario, DimAccount, and [Fact] Operational headers to extract
+    the exact values and column names needed to build industry-native DAX.
+    Returns a vocab dict used by all measure generation functions.
+    """
+    vocab = {}
+
+    # 1. Scenario names — read actual values, never hardcode
+    if "DimScenario" in csv_files:
+        dim_scenario = pd.read_csv(csv_files["DimScenario"])
+        names = dim_scenario["ScenarioName"].tolist()
+        vocab["scenario_actual"]           = next((n for n in names if "actual"   in n.lower()), names[0])
+        vocab["scenario_plan"]             = next((n for n in names if "plan"     in n.lower() and "revised" not in n.lower()), names[1] if len(names) > 1 else "Plan")
+        vocab["scenario_forecast"]         = next((n for n in names if "forecast" in n.lower() and "revised" not in n.lower()), names[2] if len(names) > 2 else "Forecast")
+        vocab["scenario_revised_forecast"] = next((n for n in names if "revised"  in n.lower()), names[3] if len(names) > 3 else "Revised Forecast")
+        vocab["all_scenarios"] = names
+    else:
+        vocab.update({"scenario_actual": "Actual", "scenario_plan": "Plan",
+                      "scenario_forecast": "Forecast", "scenario_revised_forecast": "Revised Forecast",
+                      "all_scenarios": ["Actual", "Plan", "Forecast", "Revised Forecast"]})
+
+    # 2. Account types and Level 1 P&L structure — read from DimAccount
+    if "DimAccount" in csv_files:
+        dim_account = pd.read_csv(csv_files["DimAccount"])
+        vocab["account_types"]   = dim_account["AccountType"].dropna().unique().tolist()
+        vocab["level1_accounts"] = dim_account[dim_account["AccountDepth"] == 1][["AccountCode", "AccountName", "AccountType"]].to_dict("records")
+        vocab["leaf_accounts"]   = dim_account[dim_account["IsLeafNode"] == "Yes"][["AccountKey", "AccountCode", "AccountName", "AccountType"]].to_dict("records")
+        # Identify primary revenue account type for this industry
+        rev_types = [t for t in vocab["account_types"] if any(k in t.lower() for k in ["rev", "income", "nii", "premium", "contract"])]
+        vocab["primary_revenue_type"] = rev_types[0] if rev_types else vocab["account_types"][0]
+    else:
+        vocab["account_types"] = ["Revenue", "COGS", "OpEx", "Tax"]
+        vocab["level1_accounts"] = []
+        vocab["leaf_accounts"] = []
+        vocab["primary_revenue_type"] = "Revenue"
+
+    # 3. Operational fact column names — read header if table exists
+    op_key = next((k for k in csv_files if "operational" in k.lower() or "fact_op" in k.lower()), None)
+    if op_key:
+        op_cols = list(pd.read_csv(csv_files[op_key], nrows=0).columns)
+        vocab["operational_columns"] = op_cols
+    else:
+        vocab["operational_columns"] = []
+
+    # 4. Invoice Line columns (for revenue/sales measures)
+    inv_key = next((k for k in csv_files if "invoice" in k.lower() or "salesorder" in k.lower()), None)
+    if inv_key:
+        vocab["invoice_columns"] = list(pd.read_csv(csv_files[inv_key], nrows=0).columns)
+    else:
+        vocab["invoice_columns"] = []
+
+    return vocab
+
+
+VOCAB = discover_measure_vocabulary(csv_files, MODE, internal_descs)
+
+# ── STEP 4: DESIGN AND BUILD MEASURES ────────────────────────────────────────
+def build_measures(industry, use_cases, persona, vocab):
+    """
+    Designs the folder structure and generates all measures dynamically.
+
+    Rules:
+    - Folder names and measure names are derived from the industry's vocabulary
+    - Account type references use values read from DimAccount — never hardcoded strings
+    - Scenario name references use values read from DimScenario — never hardcoded strings
+    - Operational column references use the actual column names from [Fact] Operational
+    - Every measure answers a specific business question for the selected persona
+    - No reconciliation measures. No debug measures. No generic names.
+    """
+    measures = []
+
+    # ── 00 | Base Measures (universal — always generated) ──────────────────
+    base_folder = "00 | Base Measures"
+    measures += [
+        {
+            "name": "Actual Amount",
+            "expression": f"CALCULATE( SUM( '[Fact] Financial'[Amount] ), KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = \"{vocab['scenario_actual']}\" ) )",
+            "formatString": CURRENCY_FORMAT,
+            "displayFolder": base_folder,
+            "description": f"Total financial amount from {vocab['scenario_actual']} data in the current filter context. Foundation measure used by all other calculations."
+        },
+        {
+            "name": "Plan Amount",
+            "expression": f"CALCULATE( SUM( '[Fact] Plan'[Amount] ), KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = \"{vocab['scenario_plan']}\" ) )",
+            "formatString": CURRENCY_FORMAT,
+            "displayFolder": base_folder,
+            "description": f"Total {vocab['scenario_plan']} amount for the selected accounts and period. The budget target used in all variance calculations."
+        },
+        {
+            "name": "Forecast Amount",
+            "expression": f"CALCULATE( SUM( '[Fact] Plan'[Amount] ), KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = \"{vocab['scenario_forecast']}\" ) )",
+            "formatString": CURRENCY_FORMAT,
+            "displayFolder": base_folder,
+            "description": f"Total {vocab['scenario_forecast']} amount — the updated mid-year view of performance."
+        },
+        {
+            "name": "Revised Forecast Amount",
+            "expression": f"CALCULATE( SUM( '[Fact] Plan'[Amount] ), KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = \"{vocab['scenario_revised_forecast']}\" ) )",
+            "formatString": CURRENCY_FORMAT,
+            "displayFolder": base_folder,
+            "description": f"Total {vocab['scenario_revised_forecast']} amount — the Q3 update, most closely aligned with final Actual performance."
+        },
+    ]
+
+    # ── Industry-specific folders ──────────────────────────────────────────
+    # Design folders from the industry pattern, then generate measures
+    # using vocab (actual account types, scenario names, operational columns)
+    folder_plan = design_industry_folders(industry, use_cases, vocab)
+
+    for folder in folder_plan:
+        folder_measures = generate_folder_measures(
+            folder_name      = folder["name"],
+            measure_patterns = folder["patterns"],
+            industry         = industry,
+            vocab            = vocab,
+            persona          = persona,
+            currency_format  = CURRENCY_FORMAT
+        )
+        measures += folder_measures
+
+    # ── Last | Navigation & Labels (universal — always generated) ──────────
+    nav_folder = f"{str(len(folder_plan) + 1).zfill(2)} | Navigation & Labels"
+    measures += [
+        {
+            "name": "Report Refreshed",
+            "expression": "\"Data as at: \" & FORMAT( NOW(), \"DD MMM YYYY HH:MM\" )",
+            "formatString": "@",
+            "displayFolder": nav_folder,
+            "description": "Date and time the dataset was last refreshed. Use in report headers so readers know how current the data is."
+        },
+        {
+            "name": "Selected Period",
+            "expression": "IF( HASONEVALUE( '[Dim] Date'[Year Month Label] ), SELECTEDVALUE( '[Dim] Date'[Year Month Label] ), \"Multiple Periods\" )",
+            "formatString": "@",
+            "displayFolder": nav_folder,
+            "description": "Returns the selected month label when one month is chosen; 'Multiple Periods' otherwise. Use in page titles."
+        },
+        {
+            "name": "Selected Scenario",
+            "expression": "IF( HASONEVALUE( '[Dim] Scenario'[Scenario Name] ), SELECTEDVALUE( '[Dim] Scenario'[Scenario Name] ), \"All Scenarios\" )",
+            "formatString": "@",
+            "displayFolder": nav_folder,
+            "description": "Returns the active scenario name when one scenario is selected. Use in card headings to confirm the view."
+        },
+        {
+            "name": "Latest Data Month",
+            "expression": f"FORMAT( CALCULATE( MAX( '[Fact] Financial'[Date] ), KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = \"{vocab['scenario_actual']}\" ) ), \"MMM YYYY\" )",
+            "formatString": "@",
+            "displayFolder": nav_folder,
+            "description": "The most recent month for which Actual data is loaded. Use in dashboard subtitles to communicate data freshness."
+        },
+        {
+            "name": "No Data Message",
+            "expression": "IF( ISBLANK( [Actual Amount] ), \"No data available for this selection\", BLANK() )",
+            "formatString": "@",
+            "displayFolder": nav_folder,
+            "description": "Returns a friendly message when the current filter combination has no data. Use in card visuals to avoid empty placeholders."
+        },
+    ]
+
+    return measures
+
+
+def design_industry_folders(industry, use_cases, vocab):
+    """
+    Returns a list of folder definitions for the given industry and use cases.
+    Each folder has a name and a list of measure patterns.
+    Folder names and patterns are derived from the industry — not a fixed template.
+    """
+    # Look up the industry pattern from the Industry-Specific Folder Design section
+    # Each pattern entry: { "name": folder_name, "patterns": [ {measure pattern dicts} ] }
+    # This function selects the correct industry block and filters by use_cases
+    industry_key = detect_industry_key(industry)
+    base_folders = INDUSTRY_FOLDER_PATTERNS[industry_key]
+
+    # Always include the industry's core operational folders
+    folders = [f for f in base_folders if f.get("always", False)]
+
+    # Add use-case-driven folders
+    if "variance"  in use_cases: folders += [f for f in base_folders if f.get("use_case") == "variance"]
+    if "period"    in use_cases: folders += [f for f in base_folders if f.get("use_case") == "period"]
+    if "ytd"       in use_cases: folders += [f for f in base_folders if f.get("use_case") in ("period", "ytd")]
+    if "rolling"   in use_cases: folders += [f for f in base_folders if f.get("use_case") == "rolling"]
+    if "forecast"  in use_cases: folders += [f for f in base_folders if f.get("use_case") == "forecast"]
+    if "scenario"  in use_cases: folders += [f for f in base_folders if f.get("use_case") == "scenario"]
+    if "ranking"   in use_cases: folders += [f for f in base_folders if f.get("use_case") == "ranking"]
+
+    # Number the folders sequentially starting from 01
+    for i, f in enumerate(folders, 1):
+        f["name"] = f"{str(i).zfill(2)} | {f['label']}"
+
+    return folders
+
+
+def generate_folder_measures(folder_name, measure_patterns, industry,
+                              vocab, persona, currency_format):
+    """
+    Generates actual DAX measure dicts for a folder.
+    Substitutes actual column names, account type values, and scenario names
+    from vocab into the pattern templates.
+    """
+    measures = []
+    for pattern in measure_patterns:
+        dax = pattern["dax_template"].format(
+            ACTUAL_SCENARIO           = vocab["scenario_actual"],
+            PLAN_SCENARIO             = vocab["scenario_plan"],
+            FORECAST_SCENARIO         = vocab["scenario_forecast"],
+            REVISED_FORECAST_SCENARIO = vocab["scenario_revised_forecast"],
+            PRIMARY_REVENUE_TYPE      = vocab["primary_revenue_type"],
+            **{f"OP_{c}": c for c in vocab["operational_columns"]},  # inject op column names
+        )
+        measures.append({
+            "name":          pattern["name"],
+            "expression":    dax,
+            "formatString":  pattern.get("format", currency_format),
+            "displayFolder": folder_name,
+            "description":   pattern["description"]
+        })
+    return measures
+
+# ── STEP 5: ASSEMBLE AND WRITE BIM ───────────────────────────────────────────
+def add_measure_annotations(measures):
+    """
+    Validates and annotates the measures list before it is written to the BIM:
+      1. Detects duplicate measure names — raises an error if any are found
+      2. Adds PBI_FormatHint annotation to every measure so Power BI respects formatString
+      3. Ensures every measure has a non-blank description
+
+    Why the duplicate check is critical:
+        Tabular Editor refuses to deploy a model if two measures share the same name.
+        The error is:
+            "Item 'XXX' already exists in the collection"
+        This happens when a measure is accidentally placed in two display folders,
+        or when a measure copied between folders during refactoring is not renamed.
+        Catching duplicates here, BEFORE the BIM is written, gives a clear error
+        message rather than a cryptic Tabular Editor deployment failure.
+    """
+    from collections import Counter
+
+    # ── 1. Duplicate name check ─────────────────────────────────────────────
+    name_counts = Counter(m["name"] for m in measures)
+    duplicates  = {n: c for n, c in name_counts.items() if c > 1}
+    if duplicates:
+        msg_lines = ["Duplicate measure names detected — BIM will not be written:"]
+        for name, count in duplicates.items():
+            folders = sorted({
+                m.get("displayFolder", "(no folder)")
+                for m in measures if m["name"] == name
+            })
+            msg_lines.append(f"  • '{name}' appears {count} times in folders: {folders}")
+        msg_lines.append(
+            "Resolve before continuing: rename one copy, or remove the duplicate. "
+            "Each measure name must be unique across all folders in the Measure table."
+        )
+        raise ValueError("\n".join(msg_lines))
+
+    # ── 2. Add PBI_FormatHint and ensure description ────────────────────────
+    for m in measures:
+        if "annotations" not in m:
+            m["annotations"] = []
+        has_hint = any(a["name"] == "PBI_FormatHint" for a in m["annotations"])
+        if not has_hint:
+            fmt = m.get("formatString", "")
+            hint = '{"isGeneralNumber":false}'   # safe default for all format types
+            m["annotations"].append({"name": "PBI_FormatHint", "value": hint})
+        if not m.get("description"):
+            m["description"] = f"Calculates {m['name']}."
+    return measures
+
+
+def write_bim(tables, relationships, measures):
+    measures = add_measure_annotations(measures)
+
+    # Measure table must have a DATATABLE calculated partition with at least one
+    # hidden column. The column itself MUST carry three properties or Tabular
+    # Editor will refuse to deploy:
+    #   - type: "calculatedTableColumn"
+    #   - sourceColumn: "[_]" (square brackets required, matches DATATABLE expr)
+    #   - isNameInferred: True
+    # Empty columns list causes Power BI Desktop to silently discard all measures.
+    measure_table = {
+        "name": "Measure",
+        "description": (
+            f"All DAX measures for {COMPANY_NAME} — {INDUSTRY_NAME} model. "
+            "The _ column is a hidden placeholder. "
+            "All visible content is inside the numbered display folders. "
+            "Designed & Developed by Logeshkumar Sivakumar · elogu2001@outlook.com · "
+            "© 2026 Logeshkumar Sivakumar. All rights reserved."
+        ),
+        "columns": [
+            {
+                "type":           "calculatedTableColumn",
+                "name":           "_",
+                "dataType":       "string",
+                "sourceColumn":   "[_]",
+                "isNameInferred": True,
+                "isHidden":       True,
+                "description": (
+                    "Hidden placeholder column required for Power BI Desktop to "
+                    "register the Measure table. Not used in any report visual."
+                ),
+                "annotations": [
+                    {"name": "SummarizationSetBy", "value": "User"}
+                ]
+            }
+        ],
+        "measures": measures,
+        "partitions": [
+            {
+                "name": "Measure",
+                "mode": "import",
+                "source": {
+                    "type": "calculated",
+                    "expression": 'DATATABLE( "_", STRING, {{""}} )'
+                }
+            }
+        ],
+        "isHidden": False,
+        "annotations": [
+            {"name": "PBI_ResultType",          "value": "Table"},
+            {"name": "PBI_NavigationStepName",  "value": "Navigation"}
+        ]
+    }
+
+    model = {
+        "name": f"{COMPANY_NAME.lower().replace(' ', '_')}_{INDUSTRY_NAME.lower().replace(' ', '_')}_model",
+        "compatibilityLevel": 1600,
+        "model": {
+            "description": ATTRIBUTION,
+            "defaultPowerBIDataSourceVersion": "PowerBI_V3",
+            "discourageImplicitMeasures": True,
+            "tables": tables + [measure_table],
+            "relationships": relationships,
+            "expressions": [build_dataset_folder_expression()]
+        }
+    }
+
+    # ── PRE-WRITE ASSERTIONS ─────────────────────────────────────────────────
+    # These three assertions MUST pass before the BIM is written to disk.
+    # If any fails, write_bim() stops with a clear error message so the user
+    # can identify the root cause without deploying a broken model.
+
+    bim_tables = model["model"]["tables"]
+    bim_exprs  = model["model"]["expressions"]
+
+    # ASSERTION 1: Measure table must exist as a separate table
+    measure_tables = [t for t in bim_tables if t["name"] == "Measure"]
+    assert len(measure_tables) == 1, (
+        "ASSERTION FAILED: Measure table not found as a separate table in the BIM. "
+        "Measures must live in their own 'Measure' table with a DATATABLE partition "
+        "and hidden '_' column — never inside a fact or dimension table. "
+        f"Tables in BIM: {[t['name'] for t in bim_tables]}"
+    )
+    # Verify the Measure table has measures and a partition
+    mt = measure_tables[0]
+    assert len(mt.get("measures", [])) > 0, (
+        "ASSERTION FAILED: Measure table exists but contains zero measures. "
+        "The measure generation pipeline did not produce any output."
+    )
+    assert len(mt.get("partitions", [])) > 0, (
+        "ASSERTION FAILED: Measure table has no partition. "
+        "It must have a DATATABLE calculated partition."
+    )
+
+    # ASSERTION 2: DatasetFolder expression must exist
+    ds_exprs = [e for e in bim_exprs if e.get("name") == "DatasetFolder"]
+    assert len(ds_exprs) == 1, (
+        "ASSERTION FAILED: DatasetFolder M parameter expression not found in "
+        "model.expressions. Without it, no table partition can resolve its CSV path. "
+        f"Expressions found: {[e.get('name') for e in bim_exprs]}"
+    )
+    # Verify the expression contains the meta annotation
+    ds_expr_text = ds_exprs[0].get("expression", "")
+    assert "IsParameterQuery=true" in ds_expr_text, (
+        "ASSERTION FAILED: DatasetFolder expression is missing the meta annotation. "
+        "It must contain: meta [IsParameterQuery=true, Type=\"Text\", IsParameterQueryRequired=true]"
+    )
+
+    # ASSERTION 3: Date table must use enriched M expression (not simple CSV load)
+    date_tables = [t for t in bim_tables if t["name"] == "[Dim] Date"]
+    if date_tables:
+        date_m = date_tables[0].get("partitions", [{}])[0].get("source", {}).get("expression", [])
+        date_m_text = " ".join(date_m) if isinstance(date_m, list) else str(date_m)
+        assert "DateValue" in date_m_text, (
+            "ASSERTION FAILED: [Dim] Date table is using the simple CSV load partition "
+            "instead of the enriched M expression. The enriched expression renames Date "
+            "to DateValue and generates 33 columns from it. Use build_date_table_object() "
+            "instead of build_table() for DimDate."
+        )
+    print(f"✅ All 3 pre-write assertions passed")
+    out_path = os.path.join(OUTPUT_FOLDER, BIM_FILENAME)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(model, f, indent=2, ensure_ascii=False)
+    sz = os.path.getsize(out_path) / 1024
+    print(f"✅ model.bim → {out_path}  ({sz:.1f} KB)")
+    return out_path
+
+# ── STEP 6: WRITE MEASURES REFERENCE ─────────────────────────────────────────
+def write_measures_reference(measures):
+    lines = [
+        f"# Measures Reference — {INDUSTRY_NAME}", "",
+        f"Mode: {'Integrated (from dataset creator)' if MODE == 'integrated' else 'Standalone (from uploaded files)'}",
+        f"Generated: {datetime.date.today()}  |  Company: {COMPANY_NAME}", "",
+        "| Folder | Measure | Format | Description |",
+        "|--------|---------|--------|-------------|"
+    ]
+    for m in sorted(measures, key=lambda x: (x["displayFolder"], x["name"])):
+        lines.append(
+            f"| {m['displayFolder']} | {m['name']} | `{m['formatString']}` | {m['description']} |"
+        )
+    lines += ["", "---", "", "## Full DAX Formulas", ""]
+    for m in sorted(measures, key=lambda x: (x["displayFolder"], x["name"])):
+        lines += [
+            f"### {m['name']}",
+            f"**Folder:** {m['displayFolder']}  |  **Format:** `{m['formatString']}`",
+            "", "```dax", m["expression"], "```", ""
+        ]
+    out_path = os.path.join(OUTPUT_FOLDER, MD_FILENAME)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"✅ measures_reference.md → {out_path}")
+    return out_path
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    if MODE == "integrated":
+        tables = []
+        for raw, cols in table_schemas.items():
+            if raw not in TABLE_NAME_MAP:
+                continue
+            if raw == "DimDate":
+                tables.append(build_date_table_object())  # enriched M with 33 columns
+            else:
+                tables.append(build_table(raw, TABLE_NAME_MAP[raw], cols))
+    else:
+        # In standalone, display_table_names already are the BIM table names
+        tables = []
+        for dn in display_table_names:
+            if dn == "Measure":
+                continue
+            raw = raw_name_from_display(dn)
+            if raw == "DimDate":
+                tables.append(build_date_table_object())  # enriched M with 33 columns
+            else:
+                tables.append(build_table(raw, dn, table_schemas.get(raw, [])))
+
+    relationships = build_relationships(present_tables, tables)
+    measures      = build_measures(INDUSTRY_NAME, USE_CASES, PERSONA, VOCAB)
+
+    bim_path = write_bim(tables, relationships, measures)
+    md_path  = write_measures_reference(measures)
+    print_summary(MODE, tables, relationships, measures, bim_path, md_path)
+```
+
+---
+
+## Model Documentation Files
+
+**Both files are always generated automatically alongside the BIM — never separately, never on request.**
+The Python script writes all outputs unconditionally at the end of every run.
+
+```python
+# Called unconditionally — no flags, no conditions
+generate_public_model_doc(...)
+print(f"✅ Public model guide written   : {INDUSTRY_NAME}_model_guide_public.md")
+
+generate_internal_model_doc(...)
+print(f"✅ Internal model guide written : {INDUSTRY_NAME}_model_guide_internal.md")
+```
+
+| File | Audience | Contains |
+|------|----------|---------|
+| `[industry]_model_guide_public.md` | Report developers, analysts, demo recipients | What the model is, what every measure does in plain English, which report pages to build, use cases with specific measure names, how to start in Power BI |
+| `[industry]_model_guide_internal.md` | Logeshkumar Sivakumar — private reference | Full BIM structure, all DAX formulas by folder, complete relationship map with cardinality, column visibility rules, description source per column, input mode used, file sizes |
+
+---
+
+### Public Model Guide — `[industry]_model_guide_public.md`
+
+**Audience:** Anyone who will open the PBIX or build reports from it.
+**Tone:** Plain business English. No JSON, no Python, no BIM internals.
+**Purpose:** Give the report developer a clear map of what they have and what they can build.
+
+#### File Header
+
+```
+# [Company Name] — Power BI Semantic Model Guide
+## Industry    : [Industry Name]
+## Generated   : [Date and time]
+## Input Mode  : [Integrated — from [industry] dataset | Standalone — from uploaded PBIX]
+## Use Cases   : [comma-separated list of selected use cases]
+## End User    : [selected persona]
+## Designed & Developed by : Logeshkumar Sivakumar · elogu2001@outlook.com
+## © [year] Logeshkumar Sivakumar. All rights reserved.
+```
+
+Followed by this notice block:
+
+```markdown
+> **About this document**
+> This guide describes the Power BI semantic model built for [Company Name].
+> It covers what tables are available, what every measure calculates, and which
+> report pages you can create. Use it as your starting point before opening Power BI Desktop.
+>
+> © [year] Logeshkumar Sivakumar. All rights reserved.
+> This model design, DAX architecture, and documentation are original intellectual work.
+> Unauthorised reproduction or redistribution without written permission is prohibited.
+```
+
+---
+
+#### Section 1 — About This Model
+
+3–5 sentences covering:
+- What company and industry the model is built for
+- What data it contains at a high level (financial P&L, workforce, operational metrics)
+- How many tables, measures, and display folders the model contains
+- Which input mode was used (integrated from CSV / standalone from PBIX)
+- One sentence on how to deploy it (Tabular Editor → Deploy)
+
+Example:
+```
+This semantic model is built for Lumel Inc, a B2B SaaS company. It covers financial
+performance, workforce costs, sales transactions, and recurring subscription metrics
+from January 2020 to December 2026. The model contains 14 tables, 71 measures across
+9 display folders, and 33 pre-defined relationships. It was built from the enterprise
+dataset CSV files generated in the same session. To use it, open model.bim in
+Tabular Editor and deploy to your Power BI Desktop instance.
+```
+
+---
+
+#### Section 2 — Tables in This Model
+
+One row per table in a summary table, followed by one short paragraph per table:
+
+```markdown
+| Table | Type | Description |
+|-------|------|-------------|
+| [Dim] Date | Dimension | Calendar reference — filters all facts by day, month, quarter, year |
+| [Dim] Account | Dimension | P&L hierarchy — Revenue through Net Profit |
+| ... | ... | ... |
+| [Fact] Financial | Fact | Monthly P&L summary — the primary reporting table |
+| [Fact] Invoice Line | Fact | Daily sales transactions — source for revenue metrics |
+| Measure | Calculation | All DAX measures — no data rows |
+```
+
+Then for each table, write one paragraph:
+
+```markdown
+### [Dim] Date
+The calendar table covers January 2020 to December 2026 and connects to every fact table.
+Use it to slice any visual by month, quarter, or year. The Year Month Label column (e.g., "Jan 2024")
+is ready to use as an axis label. The Month Number column controls sort order so months
+always appear in the correct sequence.
+
+### [Fact] Financial
+The central reporting table — one row per account per business unit per geography per month.
+Every P&L measure in the model reads from this table filtered to the Actual scenario.
+This is the table to use for Income Statement, P&L variance, and EBITDA visuals.
+```
+
+Write a paragraph like this for every table in the model.
+
+---
+
+#### Section 3 — Measures by Folder
+
+For each generated display folder, list every measure with its plain-English description.
+Do not show DAX formulas — those are in the internal doc. Show only name, format, and description.
+
+```markdown
+## 00 | Core Financials
+
+These measures are always available regardless of use case selection.
+They form the foundation of every P&L and variance report in the model.
+
+| Measure | Format | What It Answers |
+|---------|--------|----------------|
+| Actual Amount | #,##0 | Total financial amount from reported Actual data in the current filter context |
+| Plan Amount | #,##0 | Total budget amount for the selected accounts and period |
+| Gross Profit [Actual] | #,##0 | Revenue minus COGS — how much the business earns before operating costs |
+| EBITDA [Actual] | #,##0 | Operating profit before interest, tax, depreciation, and amortisation |
+| Net Profit [Actual] | #,##0 | Bottom-line profit after all costs including tax |
+| ... | ... | ... |
+
+## 01 | Variance Analysis
+
+Use these measures in waterfall charts, variance tables, and traffic-light KPI cards.
+
+| Measure | Format | What It Answers |
+|---------|--------|----------------|
+| Variance vs Plan | #,##0 | How much Actual beat or missed the budget in monetary terms |
+| Variance vs Plan % | 0.0% | The same miss expressed as a percentage — easier for comparisons |
+| Variance Flag | @ | "▲ Favourable" or "▼ Unfavourable" — use for conditional formatting |
+| ... | ... | ... |
+```
+
+Repeat this pattern for every folder that was generated in this run.
+Write a one-sentence intro for each folder explaining when to use those measures.
+
+---
+
+#### Section 4 — Report Pages You Can Build
+
+This is the most important section for the report developer.
+Generate **one subsection per suggested report page**, based on the use cases selected and the industry.
+Each subsection includes: the page title, the business question it answers, the visuals to use,
+the specific measures to put in each visual, and any filters or slicers needed.
+
+**Always generate at least these standard pages** regardless of use case selection:
+
+---
+
+**Page: Executive Summary**
+```markdown
+### Page 1 — Executive Summary
+**Business question**: How is the business performing this month vs plan and last year?
+
+**Visuals to build:**
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| Revenue card | KPI Card | Revenue [Actual], Variance vs Plan % | — |
+| Gross Profit card | KPI Card | Gross Profit [Actual], Variance vs Plan % | — |
+| EBITDA card | KPI Card | EBITDA [Actual], EBITDA Margin % | — |
+| P&L summary | Inforiver Matrix | Actual Amount, Plan Amount, Variance vs Plan, Variance vs Plan % | [Dim] Account (hierarchy) |
+| Trend line | Line Chart | Actual Amount, Plan Amount | [Dim] Date (Month Label) |
+| Latest month label | Card | Selected Period | — |
+| Scenario label | Card | Selected Scenario | — |
+
+**Slicers:** [Dim] Date (Year Month), [Dim] Scenario (Scenario Name), [Dim] Business Unit (Business Unit Name)
+
+**Tip:** Use the Inforiver Matrix visual for the P&L summary — it supports the Account hierarchy
+natively and renders Actual/Plan/Variance columns side by side without additional DAX.
+```
+
+---
+
+**Page: Variance Analysis**
+```markdown
+### Page 2 — Variance Analysis
+**Business question**: Which accounts drove the variance against plan this month and YTD?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| Waterfall | Waterfall Chart | Variance vs Plan | [Dim] Account (Account Name) |
+| Variance table | Inforiver Matrix | Actual Amount, Plan Amount, Variance vs Plan, Variance vs Plan % | [Dim] Account (hierarchy) × [Dim] Business Unit |
+| YTD variance card | KPI Card | YTD Variance vs Plan, YTD Variance vs Plan % | — |
+| Favourable / Unfavourable | Clustered Bar | Absolute Variance vs Plan | [Dim] Account (Account Name), coloured by Variance Flag |
+| Prior year comparison line | Line Chart | Actual Amount, Prior Year Actual, YoY Change % | [Dim] Date (Month Label) |
+
+**Slicers:** [Dim] Date (Year), [Dim] Account (Account Type), [Dim] Geography (Country)
+
+**Tip:** Filter the waterfall to leaf-level accounts only using [Dim] Account[Is Leaf] = "Yes"
+to prevent double-counting rollup nodes.
+```
+
+---
+
+**Page: Revenue & Sales** *(generate if Revenue & Sales use case selected)*
+```markdown
+### Page 3 — Revenue & Sales
+**Business question**: Where is revenue coming from, and how is commercial performance trending?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| Revenue trend | Area Chart | Total Revenue, Plan Amount | [Dim] Date (Month Label) |
+| Revenue by product | Bar Chart | Total Revenue, Revenue Mix % | [Dim] Product (Product Name) |
+| Revenue by region | Map / Bar | Total Revenue | [Dim] Geography (Country) |
+| ASP trend | Line Chart | Average Selling Price | [Dim] Date (Month Label) |
+| Discount analysis | Clustered Bar | Gross Revenue, Total Discount, Total Revenue | [Dim] Product (Sub-Category) |
+| Units sold trend | Column Chart | Units Sold | [Dim] Date (Month Label) |
+| Top 10 customers table | Table | Total Revenue, Revenue Mix % | [Dim] Customer (Customer Name) |
+
+**Slicers:** [Dim] Date (Year Month), [Dim] Product (Category → Product), [Dim] Customer (Customer Segment)
+```
+
+---
+
+**Page: Cost & Expense Analysis** *(generate if Cost & Expense use case selected)*
+```markdown
+### Page 4 — Cost & Expense Analysis
+**Business question**: What is driving costs and where can efficiency be improved?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| Cost breakdown donut | Donut Chart | Actual Amount | [Dim] Account (Account Type: COGS / OPEX breakdown) |
+| Payroll vs plan | Clustered Bar | Total Payroll Cost, Plan Amount | [Dim] Date (Quarter Label) |
+| Payroll by department | Bar Chart | Total Payroll Cost | [Dim] Department (Department Name) |
+| Expense claims by category | Column Chart | Total Expense Claims | Expense Category |
+| Cost trend | Line Chart | COGS [Actual], OPEX [Actual], Gross Profit [Actual] | [Dim] Date (Month Label) |
+| Payroll % of Revenue | KPI Card | Payroll % of Revenue | — |
+| Expense per Head | KPI Card | Expense per Head | — |
+
+**Slicers:** [Dim] Date (Year, Quarter), [Dim] Business Unit, [Dim] Department
+```
+
+---
+
+**Page: Forecasting & Full Year Outlook** *(generate if Forecasting use case selected)*
+```markdown
+### Page 5 — Forecasting & Full Year Outlook
+**Business question**: Will we hit our annual targets, and what does the rest of the year look like?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| FYE vs Plan card | KPI Card | Full Year Estimate, FYE vs Full Year Plan, FYE vs Full Year Plan % | — |
+| Elapsed vs remaining months | Clustered Bar | Elapsed Months, Remaining Months | — (single value) |
+| Actuals + Forecast combo | Line + Column | Actual Amount (columns), Forecast Amount (line) | [Dim] Date (Month Label) |
+| Run Rate card | KPI Card | Run Rate | — |
+| Scenario comparison table | Inforiver Matrix | Actual Amount, Plan Amount, Forecast Amount, Revised Forecast Amount | [Dim] Account (hierarchy) |
+| Latest data month label | Card | Latest Data Month | — |
+
+**Slicers:** [Dim] Account (Account Type), [Dim] Business Unit
+```
+
+---
+
+**Page: Scenario Comparison** *(generate if Scenario Comparison use case selected)*
+```markdown
+### Page 6 — Scenario Comparison
+**Business question**: How do our three planning scenarios compare, and how far has the view shifted?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| Scenario selector | Slicer | — | [Dim] Scenario (Scenario Name) |
+| Selected scenario amount | KPI Card | Selected Scenario Amount | — |
+| Plan vs Forecast gap | Card | Plan vs Forecast Gap, Plan vs Forecast Gap % | — |
+| Forecast vs Revised Forecast gap | Card | Forecast vs Revised Forecast Gap | — |
+| All scenarios side by side | Inforiver Matrix | Plan Amount, Forecast Amount, Revised Forecast Amount, Actual Amount | [Dim] Account (hierarchy) |
+| Best / Worst case range | Clustered Bar | Best Case, Worst Case, Scenario Range | [Dim] Account (Account Type) |
+
+**Slicers:** [Dim] Date (Year, Quarter), [Dim] Business Unit
+```
+
+---
+
+**Page: Rolling & Period Trends** *(generate if Rolling Averages or Period-over-Period selected)*
+```markdown
+### Page 7 — Rolling & Period Trends
+**Business question**: What is the underlying trend when short-term noise is removed?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| 3M vs 12M rolling | Line Chart | 3M Rolling Average, 12M Rolling Average, Actual Amount | [Dim] Date (Month Label) |
+| YoY change trend | Column Chart | YoY Change % | [Dim] Date (Month Label) — colour by positive/negative |
+| MoM change trend | Line Chart | MoM Change, MoM Change % | [Dim] Date (Month Label) |
+| QoQ comparison | Clustered Bar | Actual Amount, Prior Quarter Actual, QoQ Change % | [Dim] Date (Quarter Label) |
+| 12M rolling total | Area Chart | 12M Rolling Total | [Dim] Date (Month Label) |
+
+**Slicers:** [Dim] Account (Account Name), [Dim] Business Unit, [Dim] Geography (Region)
+```
+
+---
+
+**Page: YTD Performance** *(generate if YTD / QTD / MTD use case selected)*
+```markdown
+### Page 8 — YTD Performance
+**Business question**: How much of the year's budget have we delivered, and are we on track?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| YTD Actual vs Plan | Bullet Chart / Gauge | YTD Actual, YTD Plan | — |
+| YTD variance by account | Bar Chart | YTD Variance vs Plan, YTD Variance vs Plan % | [Dim] Account (Account Name) |
+| YTD vs Prior Year | Clustered Bar | YTD Actual, Prior Year YTD Actual, YTD vs Prior Year % | [Dim] Date (Calendar Year) |
+| QTD Actual | KPI Card | QTD Actual, QTD Plan | — |
+| MTD Actual | KPI Card | MTD Actual | — |
+| YTD progress line | Line Chart | YTD Actual, YTD Plan | [Dim] Date (Month Label) |
+
+**Slicers:** [Dim] Business Unit, [Dim] Geography, [Dim] Account (Account Type)
+```
+
+---
+
+**Page: Ranking & Pareto** *(generate if Ranking & Pareto use case selected)*
+```markdown
+### Page 9 — Ranking & Pareto
+**Business question**: Which 20% of products / regions / customers drive 80% of revenue?
+
+| Visual | Type | Measures | Dimensions |
+|--------|------|----------|------------|
+| Ranked bar chart | Horizontal Bar | Total Revenue (sorted by Revenue Rank) | [Dim] Product (Product Name) |
+| Pareto combo chart | Line + Column | Total Revenue (column), Cumulative Revenue % (line) | [Dim] Product (Product Name) |
+| Top 20% flag table | Table | Total Revenue, Revenue Rank, Is Top 20%, Cumulative Revenue % | [Dim] Product / [Dim] Geography |
+| Top 10 contribution card | KPI Card | Top 10 Revenue % | — |
+| Rank by region | Map / Bar | Revenue Rank | [Dim] Geography (Country) |
+
+**Slicers:** [Dim] Date (Year), [Dim] Account (Account Type: Revenue)
+**Tip:** Set the bar chart sort to ascending Revenue Rank so Rank 1 always appears at the top.
+```
+
+---
+
+**Page: [Industry-Specific KPI Page]** *(always generate — content driven by industry)*
+
+Generate one industry-specific page. Title and visuals depend on industry:
+
+```markdown
+### Page [N] — [Industry KPI Page Title]
+**Business question**: [The primary operational question for this industry]
+```
+
+| Industry | Page Title | Key Measures for This Page |
+|----------|-----------|---------------------------|
+| B2B SaaS | SaaS Health Dashboard | MRR, ARR, Customer Churn Rate %, ARPU, CAC, Net Revenue Retention % |
+| Retail | Store & Category Performance | Same-Store Sales Growth %, Basket Size, Inventory Turnover, Sell-Through Rate %, Revenue per Square Foot |
+| Manufacturing | Production & Quality | OEE %, Production Volume, Defect Rate %, Cost per Unit Produced, Capacity Utilisation % |
+| Healthcare | Clinical Performance | Bed Occupancy Rate %, ALOS, Revenue per Patient, Cost per Patient, Doctor Utilisation % |
+| Financial Services | Portfolio & Efficiency | NIM %, Cost-to-Income Ratio %, NPA %, Claims Ratio % |
+| Hospitality | Property Performance | Occupancy Rate %, ADR, RevPAR, GOPPAR |
+| Logistics | Operations Dashboard | On-Time Delivery Rate %, Cost per Shipment, Warehouse Utilisation %, Fleet Utilisation % |
+
+For the industry-specific page, write the same full visual table format as all pages above —
+Visual, Type, Measures, Dimensions — tailored to that industry's KPIs.
+
+---
+
+#### Section 5 — Using Tabular Editor and Power BI Desktop
+
+```markdown
+## 5. Using Tabular Editor and Power BI Desktop
+
+This section is the complete step-by-step guide to deploying the model and keeping it
+up to date. Read it fully before opening either application.
+
+---
+
+### Prerequisites
+
+| Tool | Version | Where to Get It |
+|------|---------|----------------|
+| Tabular Editor 2 | Latest | tabulareditor.com → Download TE2 (free) |
+| Power BI Desktop | Latest | Microsoft Store or powerbi.microsoft.com |
+| Python 3.10+ | Latest | python.org |
+| pandas library | Latest | `pip install pandas` in terminal |
+
+---
+
+### Part A — First-Time Deployment
+
+#### Step 1 — Update the CSV Folder Path
+
+Before running anything, open `build_model.py` in any text editor and find this line:
+
+```python
+CSV_FOLDER = "./csv_output"   # Mode 1
+# or
+PBIX_PATH  = "./uploaded.pbix"   # Mode 2
+```
+
+Change it to the full path of the folder containing your CSV files:
+
+```python
+CSV_FOLDER = "C:\\Users\\YourName\\Desktop\\VivaNova\\Dataset"
+```
+
+Save the file.
+
+#### Step 2 — Run build_model.py
+
+Open a terminal or command prompt in the folder where `build_model.py` is saved and run:
+
+```
+python build_model.py
+```
+
+This produces:
+- `[industry]_model.bim` — the semantic model file
+- `[industry]_model_guide_public.md` — this document
+- `[industry]_model_guide_internal.md` — technical reference
+- `measures_reference.md` — full DAX reference
+
+#### Step 3 — Open Power BI Desktop First
+
+**Critical: Power BI Desktop must be open before you deploy from Tabular Editor.**
+
+1. Open Power BI Desktop
+2. Create a **new blank report** — File → New
+3. Do not load any data yet
+4. Leave it open in the background
+
+#### Step 4 — Open the BIM in Tabular Editor 2
+
+1. Open Tabular Editor 2
+2. File → **Open from File**
+3. Navigate to the output folder and select `[industry]_model.bim`
+4. The left panel shows all tables. Click any table to see its columns and measures
+
+#### Step 5 — Update the DatasetFolder Parameter
+
+Before deploying, update the CSV path inside Tabular Editor:
+
+1. In the left panel, expand **Expressions**
+2. Click **DatasetFolder**
+3. In the Expression Editor on the right, update the path:
+   ```
+   "C:\Users\YourName\Desktop\VivaNova\Dataset" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+   ```
+   ⚠️ Use single backslashes in this editor. The path must be wrapped in double quotes.
+4. Press **Ctrl+S** to save the change inside Tabular Editor (this does not save to disk — it updates the in-memory model)
+
+#### Step 6 — Deploy to Power BI Desktop
+
+1. In Tabular Editor 2: **Model → Deploy**
+2. The Deploy dialog opens. Select the target:
+   - Choose **Power BI Desktop** from the server dropdown
+   - If multiple PBIX files are open, select the correct one
+3. Click **Deploy**
+4. Wait for the confirmation message: *"Deployment successful"*
+
+Switch back to Power BI Desktop — all tables, relationships, and measures now appear in the Fields pane on the right.
+
+#### Step 7 — Load Data in Power BI Desktop
+
+The model structure is deployed but the tables are empty. Load the CSV data:
+
+1. In Power BI Desktop: **Home → Refresh**
+2. If prompted for data source credentials, click **Edit Credentials**
+3. Select **Anonymous** (local CSVs do not require authentication)
+4. Click **Connect**, then **Load**
+5. The status bar shows rows loading into each table
+
+#### Step 8 — Verify the Deployment
+
+Check these three views:
+
+| View | How to Open | What to Look For |
+|------|------------|-----------------|
+| Data view | Table icon on the left sidebar | Each table shows rows — check row counts match expected dataset size |
+| Model view | Diagram icon on the left sidebar | Lines connect all fact tables to their dimension tables |
+| Fields pane | Right side of any report page | Measure table visible with 12–13 numbered display folders |
+
+---
+
+### Part B — How to Update Measures After Changes
+
+**This is the most important section if measures are not showing changes.**
+
+#### ⚠️ Why "Refresh" Does Not Update Measures
+
+In Power BI Desktop, **Home → Refresh** only reloads the data (the CSV rows).
+It does **not** update the model structure — tables, columns, relationships, or measures.
+
+If you change a measure in `build_model.py` and run the script again, the new BIM file
+is on disk but Power BI Desktop does not know about it. You must re-deploy.
+
+#### The Correct Update Workflow
+
+Every time you change measures, relationships, or table structure:
+
+```
+1. Make changes in build_model.py
+2. Run: python build_model.py  (generates a new BIM file)
+3. In Tabular Editor 2: File → Open from File → select the new BIM
+   (or, if already open: File → Reload from Disk)
+4. Update DatasetFolder path if needed (Step A5 above)
+5. Model → Deploy  (re-deploys to the open Power BI Desktop)
+6. In Power BI Desktop: Home → Refresh  (reloads data into the updated model)
+```
+
+#### Faster Workflow — Keep Tabular Editor Connected
+
+Instead of re-opening the BIM each time, keep Tabular Editor connected to Power BI
+Desktop as an external tool:
+
+1. In Power BI Desktop: **External Tools** tab (top ribbon)
+2. If Tabular Editor is installed, it appears here automatically
+3. Click **Tabular Editor** — it opens connected to the current PBIX model
+4. Make measure edits directly in Tabular Editor
+5. Press **Ctrl+S** — changes save directly to the open Power BI Desktop file
+6. No deploy step needed — changes are live immediately
+
+> **Tip:** Use the External Tools method for iterative measure editing.
+> Use the build_model.py → BIM → Deploy method when you need to rebuild
+> the full model from scratch (new industry, new dataset, structural changes).
+
+---
+
+### Part C — Adding Measures Manually in Tabular Editor
+
+If you want to add or edit a specific measure without rebuilding the full BIM:
+
+1. In Tabular Editor (connected via External Tools or after deployment):
+2. In the left panel, expand the **Measure** table
+3. Right-click the display folder → **Add Measure**
+4. Type the DAX in the Expression Editor
+5. Set the **Display Folder** in the Properties pane (right side) to match the numbered folder
+6. Set **Format String** (e.g., `"$#,##0"` or `"0.0%"`)
+7. Add a **Description** in the Properties pane — this appears as a tooltip in Power BI
+8. Press **Ctrl+S** to save to Power BI Desktop
+
+---
+
+### Part D — Troubleshooting Common Issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Measures changed in build_model.py but not visible in Power BI | Refresh was used instead of re-deploy | Re-run build_model.py → open new BIM in Tabular Editor → Model → Deploy |
+| "Deployment failed — server not found" | Power BI Desktop was not open when Deploy was clicked | Close Tabular Editor, open Power BI Desktop first, then re-open BIM and deploy |
+| Tables show no rows after deploy | Data refresh not run after deployment | Home → Refresh in Power BI Desktop |
+| Credential prompt on refresh | Power BI asking for CSV authentication | Select Anonymous in the credential dialog |
+| Month labels sort alphabetically (Apr before Jan) | BIM was built before sort rules were added | Re-run build_model.py — `sortByColumn` is now applied automatically for Date, Account, Product, Geography and all other dimension tables |
+| Measures show blank in visuals | Filter context excludes all rows | Add [Dim] Date and [Dim] Scenario slicers to the page and select values |
+| Display folders not visible in Fields pane | Power BI Desktop is in compact field list mode | Click the ⋯ menu at the top of Fields pane → Show display folders |
+| DatasetFolder path error on refresh | Backslash format wrong in the BIM | In Tabular Editor, check DatasetFolder uses single backslashes: `C:\Users\...` |
+| Model deploys but relationships show (none) ∞←1 (none) | `fromColumn`/`toColumn` used `sourceColumn` values instead of column `name` (display name). TOM resolves by `name` | Re-run build_model.py — relationships now use display names. build_relationships() validates columns exist before writing |
+| Date relationships show (none) on one side | [Dim] Date's column is `"Date"` (from enriched M) but relationship used `"Date Key"` | Re-run build_model.py — Date to_col is now `"Date"`, asymmetric with fact table's `"Date Key"` |
+| "Column '_' missing SourceColumn property" deploy error | Measure table placeholder column missing required properties | Re-run build_model.py — the `_` column now carries `type`, `sourceColumn: "[_]"`, and `isNameInferred: true` |
+| "Item 'XXX' already exists in the collection" deploy error | Duplicate measure name across folders | Re-run build_model.py — `add_measure_annotations()` now raises a clear ValueError listing the duplicate and its folders before the BIM is written |
+| Every column shows as "Text" type in Power BI | Pandas dtype inference returned `object` for every column | Re-run build_model.py — `infer_data_type()` now uses column name pattern matching, not pandas dtype |
+| Drill-down columns (Level 1, Level 2, Level 3) shown as flat list | Hierarchy not created on the dimension table | Re-run build_model.py — `build_hierarchies()` now adds `[H] Account Hierarchy`, `[H] Geography`, etc. to every applicable dimension table |
+
+---
+
+### Part E — Formatting After Deployment
+
+Sorting (months, quarters, accounts in P&L order, product hierarchies) is **now applied
+automatically by the skill** via `sortByColumn` properties in the BIM. No manual sorting
+is required after deployment.
+
+These steps are done once in Power BI Desktop after the first successful deployment:
+
+**Verify sort is correct (optional check):**
+1. Add a line chart to a page
+2. Drag `[Dim] Date` → `Month Short Name` to the X-axis
+3. Months should appear as Jan, Feb, Mar, Apr... not Apr, Aug, Dec...
+
+**If months still sort alphabetically:** the BIM was generated before sort rules were
+added. Re-run `build_model.py` and redeploy.
+
+**Set table descriptions visible as tooltips:**
+1. Hover over any column in the Fields pane
+2. The description set in the BIM appears as a tooltip automatically
+
+**Hide the Measure table from report users (optional):**
+1. In Model view, right-click **Measure** table
+2. Select **Hidden** → the measures remain accessible but the table is not visible to report consumers
+```
+
+---
+
+#### Section 6 — Use Cases at a Glance
+
+A quick-reference table for the report developer — all selected use cases, the measures to reach for, and the best visual type:
+
+```markdown
+## 6. Use Cases at a Glance
+
+| Use Case | Business Question | Key Measures | Best Visual |
+|----------|------------------|--------------|-------------|
+| Variance Analysis | Did we hit our budget? By how much? | Variance vs Plan, Variance vs Plan %, Variance Flag | Inforiver Matrix, Waterfall |
+| Period Comparison | Are we growing month over month? | MoM Change %, YoY Change %, Prior Year Actual | Line Chart, Clustered Bar |
+| YTD Performance | How much of the year's plan have we delivered? | YTD Actual, YTD Plan, YTD Variance vs Plan % | Gauge, Bullet Chart |
+| Rolling Averages | What's the underlying trend without noise? | 3M Rolling Average, 12M Rolling Average | Line Chart (dual axis) |
+| Forecasting | Will we hit our annual target? | Full Year Estimate, FYE vs Full Year Plan %, Run Rate | KPI Card, Combo Chart |
+| Scenario Comparison | How have our scenarios changed over time? | Selected Scenario Amount, Plan vs Forecast Gap, Best Case, Worst Case | Inforiver Matrix |
+| KPI & Ratios | Are our margins healthy? | Gross Margin %, EBITDA Margin %, Net Profit Margin % | KPI Card, Scorecard |
+| Revenue & Sales | Where is revenue coming from? | Total Revenue, Revenue Mix %, Average Selling Price | Bar Chart, Map, Treemap |
+| Cost & Expense | What is driving costs? | Total Payroll Cost, OPEX % of Revenue, Expense per Head | Donut, Stacked Bar |
+| Ranking & Pareto | Which 20% drive 80% of revenue? | Revenue Rank, Cumulative Revenue %, Is Top 20% | Pareto Combo Chart |
+| Dynamic Selection | Let the user pick any P&L metric | Selected Metric, Selected Metric Label, Selected Metric Variance vs Plan | Card, Any chart |
+| [Industry KPI] | [Industry-specific question] | [Industry-specific measures from folder 12] | [Industry-appropriate visual] |
+```
+
+---
+
+#### File Footer
+
+```markdown
+---
+
+© [year] Logeshkumar Sivakumar. All rights reserved.
+This model guide describes the Power BI semantic model designed and developed by Logeshkumar Sivakumar.
+This document may be shared with report developers and clients provided this attribution remains intact.
+Contact: elogu2001@outlook.com
+```
+
+---
+
+### Internal Model Guide — `[industry]_model_guide_internal.md`
+
+**Audience:** Logeshkumar Sivakumar only.
+**Tone:** Technical, complete, no simplifications.
+**Purpose:** Full record of every decision made in this build — referenceable without reopening the BIM.
+
+#### File Header
+
+```
+# [Company Name] — Power BI Semantic Model — INTERNAL REFERENCE
+## Industry    : [Industry Name]
+## Generated   : [Date and time]
+## Input Mode  : [Mode 1 — Integrated | Mode 2 — Standalone]
+## Input Files : [list of CSV folder / PBIX path / doc paths used]
+## Use Cases   : [comma-separated]
+## End User    : [persona]
+## Designed & Developed by : Logeshkumar Sivakumar · elogu2001@outlook.com
+## © [year] Logeshkumar Sivakumar. All rights reserved.
+## CONFIDENTIAL — NOT FOR DISTRIBUTION
+```
+
+Blockquote notice:
+```markdown
+> © [year] Logeshkumar Sivakumar. All rights reserved.
+> This model design, DAX architecture, display folder structure, relationship mapping,
+> and documentation are the original intellectual work of Logeshkumar Sivakumar.
+> CONFIDENTIAL — Internal use only. Do not distribute.
+```
+
+---
+
+#### Section 1 — Build Summary
+
+Full run statistics:
+
+```markdown
+## Section 1 — Build Summary
+
+| Item | Value |
+|------|-------|
+| Industry | [industry] |
+| Company | [company] |
+| Input Mode | [Mode 1 / Mode 2] |
+| Input CSV folder | [path] — [N] tables found |
+| Input PBIX | [filename] — [N] tables extracted |
+| Public doc used | [Yes — path / No] |
+| Internal doc used | [Yes — path / No] |
+| BIM output | [path] — [file size] |
+| Tables in BIM | [count] ([N] dims, [N] facts, 1 measure table) |
+| Relationships defined | [count] |
+| Relationships skipped | [count] (tables not present in input) |
+| Total measures | [count] |
+| Measure folders generated | [count] / 14 |
+| Columns in model | [count total] ([N] visible, [N] hidden) |
+| Columns with description from internal doc | [count] |
+| Columns with description from public doc | [count] |
+| Columns with description from built-in catalogue | [count] |
+| Columns auto-described from name | [count] |
+| Use cases selected | [list] |
+| Persona | [persona] |
+| Naming convention applied | [standard [Dim]/[Fact] / preserved from PBIX / custom] |
+```
+
+---
+
+#### Section 2 — Table Reference
+
+For every table in the BIM:
+
+```markdown
+### [Dim] Account
+- **Raw name**: DimAccount
+- **Display name**: [Dim] Account
+- **Description**: [description embedded in BIM]
+- **Row count** (Mode 1 only): [N rows from CSV]
+- **Columns**: [count total] — [N] visible, [N] hidden
+- **Description source**: [Internal doc / Public doc / Built-in catalogue / Auto]
+- **Relationships from this table**: [list of to-table → column pairs]
+- **Columns**:
+
+| Display Name | Raw Name | Type | Hidden | Description Source | Description |
+|-------------|----------|------|--------|--------------------|-------------|
+| Account Key | AccountKey | int | ✅ Yes | Built-in catalogue | Unique integer identifier... |
+| Account Code | AccountCode | string | No | Internal doc | Alphanumeric code... |
+| ... | ... | ... | ... | ... | ... |
+```
+
+Repeat for every table. Generate this block programmatically from the table schemas.
+
+---
+
+#### Section 3 — Full Relationship Map
+
+```markdown
+## Section 3 — Full Relationship Map
+
+| # | From Table | From Column | → | To Table | To Column | Active | Cardinality |
+|---|-----------|------------|---|----------|----------|--------|-------------|
+| 1 | [Fact] Financial | Date Key | → | [Dim] Date | Date Key | ✅ | Many-to-One |
+| 2 | [Fact] Financial | Account Key | → | [Dim] Account | Account Key | ✅ | Many-to-One |
+| ... | | | | | | | |
+
+### Skipped Relationships (tables not present in input)
+
+| From Table | Reason Skipped |
+|-----------|----------------|
+| [Fact] CapEx | Table not found in input files |
+| ... | ... |
+```
+
+---
+
+#### Section 4 — Full Measure Reference
+
+For every measure, one block:
+
+```markdown
+## Section 4 — Full Measure Reference
+
+### 00 | Core Financials
+
+#### Actual Amount
+- **Display Folder**: 00 | Core Financials
+- **Format String**: `#,##0`
+- **Description**: Total financial amount from reported Actual data...
+- **DAX**:
+  ```dax
+  Actual Amount =
+  VAR _actual =
+      CALCULATE(
+          SUM( '[Fact] Financial'[Amount] ),
+          KEEPFILTERS( '[Dim] Scenario'[Scenario Name] = "Actual" )
+      )
+  RETURN _actual
+  ```
+
+#### Plan Amount
+...
+```
+
+Repeat for every measure in every folder.
+
+---
+
+#### Section 5 — Column Naming Rules Applied
+
+```markdown
+## Section 5 — Column Naming Rules Applied
+
+| Rule | Examples Applied |
+|------|-----------------|
+| Key suffix removed from FK display names | ProductKey → Product Key, AccountKey → Account Key |
+| CamelCase split with spaces | AccountCode → Account Code, NetAmount → Net Amount |
+| FK columns hidden | All [Xxx]Key columns: isHidden = true |
+| Technical columns hidden | HierarchyPath, IsLeafNode, SignConvention: isHidden = true |
+| Columns preserved as-is | Date, Amount, Status columns |
+```
+
+---
+
+#### Section 6 — Description Coverage Report
+
+```markdown
+## Section 6 — Description Coverage
+
+| Table | Total Visible Cols | Internal Doc | Public Doc | Built-in Catalogue | Auto-Described |
+|-------|-------------------|-------------|------------|-------------------|----------------|
+| [Dim] Date | 17 | 0 | 0 | 17 | 0 |
+| [Dim] Account | 14 | 12 | 0 | 2 | 0 |
+| [Fact] Financial | 4 | 4 | 0 | 0 | 0 |
+| ... | | | | | |
+| **Total** | [N] | [N] | [N] | [N] | [N] |
+```
+
+---
+
+#### Section 7 — Deployment Notes
+
+```markdown
+## Section 7 — Deployment Notes
+
+### How to Deploy
+1. Open model.bim in Tabular Editor 2 or 3 (free)
+2. Model menu → Deploy → select Power BI Desktop instance
+3. Confirm all tables, relationships, and display folders appear in the field list
+4. Verify that the Measure table is visible and measures are organised into folders
+
+### Known Limitations
+- DataModel inside a PBIX cannot be read directly — column names for Mode 2 require
+  either CSV exports or the description documentation files
+- KEEPFILTERS on Scenario Name assumes the Scenario table uses "Actual" / "Plan" /
+  "Forecast" / "Revised Forecast" as ScenarioName values — verify against DimScenario
+- The Measure Selector dynamic measures require a What-If Parameter to be created
+  manually in Power BI Desktop (New Parameter → Numeric Range → 1 to 5)
+- Self-referencing hierarchy columns (ParentXxxKey) are kept visible in Tabular Editor
+  but should be confirmed hidden in Power BI Desktop after deployment
+
+### Compatibility
+- model.bim compatibility level: 1550 (Power BI Premium / Pro / PPU)
+- Tabular Editor 2 (free): fully supported
+- Tabular Editor 3 (paid): fully supported
+- SSAS / Fabric: compatible with minor M expression adjustments for data source
+```
+
+---
+
+#### File Footer
+
+```markdown
+---
+
+CONFIDENTIAL — © [year] Logeshkumar Sivakumar. All rights reserved.
+Internal use only. Do not distribute outside of authorised recipients.
+Contact: elogu2001@outlook.com
+```
+
+---
+
+### Documentation Python Functions
+
+Both functions are included verbatim in `build_model.py` and called unconditionally:
+
+```python
+def _getting_started_section():
+    """
+    Returns lines for Section 5 of the public model guide.
+    Full step-by-step guide: build_model.py → DatasetFolder → Power BI Desktop → Tabular Editor → deploy → verify.
+    """
+    return [
+        "### What You Need (One-Time Setup)",
+        "",
+        "| Tool | Purpose | Where to Get It |",
+        "|------|---------|----------------|",
+        "| Tabular Editor 2 | Opens the BIM and deploys the model | tabulareditor.com — free |",
+        "| Power BI Desktop | The report layer — receives the deployed model | microsoft.com/power-bi — free |",
+        "| Python 3.10+ | Runs build_model.py to generate the BIM | python.org — free |",
+        "",
+        "---",
+        "",
+        "### Step 1 — Run build_model.py",
+        "",
+        "Open a terminal in the output folder and run:",
+        "```",
+        "python build_model.py",
+        "```",
+        "The terminal prints a summary: table count, relationship count, measure count, and all file paths.",
+        "",
+        "---",
+        "",
+        "### Step 2 — Update the DatasetFolder Path",
+        "",
+        "Open model.bim in Notepad or VS Code. Find the `DatasetFolder` expression — it looks like:",
+        '`"C:\\\\Users\\\\YourName\\\\Desktop\\\\Dataset"`',
+        "",
+        "Replace the path with your actual CSV folder. Use double backslashes:",
+        '`"D:\\\\Projects\\\\YourCompany\\\\Dataset"`',
+        "",
+        "Save the file.",
+        "",
+        "---",
+        "",
+        "### Step 3 — Open Power BI Desktop",
+        "",
+        "Open Power BI Desktop and select **Blank report**. Do not load any data. Leave it open in the background.",
+        "",
+        "---",
+        "",
+        "### Step 4 — Deploy from Tabular Editor",
+        "",
+        "1. Open Tabular Editor 2",
+        "2. File → Open from File → select model.bim",
+        "3. Verify table names appear in the left panel",
+        "4. Press **Ctrl+S** to save — this step is mandatory before deploying",
+        "5. Go to **Model → Deploy to Power BI Desktop**",
+        "6. Select your Power BI Desktop instance from the list",
+        "7. Click OK — wait for 'Deployment successful'",
+        "",
+        "> **If Deploy is greyed out:** Go to File → Connect to Power BI Desktop and select your instance manually.",
+        "",
+        "---",
+        "",
+        "### Step 5 — Refresh in Power BI Desktop",
+        "",
+        "After deploy, Power BI Desktop does not auto-refresh the field list.",
+        "",
+        "1. Switch to Power BI Desktop",
+        "2. Click **Home → Refresh** in the ribbon",
+        "3. Wait for data to load from your CSV files",
+        "4. Open the **Fields** pane — the Measure table appears with all display folders",
+        "",
+        "> **Data source error?** The DatasetFolder path does not match your CSV folder. Fix the path in the BIM and redeploy.",
+        "",
+        "---",
+        "",
+        "### Step 6 — Verify the Model",
+        "",
+        "| Check | Where to Look | Expected Result |",
+        "|-------|--------------|----------------|",
+        "| Tables loaded | Data view (table icon, left sidebar) | All tables with row counts |",
+        "| Relationships | Model view (diagram icon) | Lines connecting every fact to its dimensions |",
+        "| Measures in folders | Fields pane → Measure table | Numbered folders (00, 01, 02...) |",
+        "| Column tooltips | Hover any column in Fields pane | Description text visible |",
+        "",
+        "---",
+        "",
+        "### Step 7 — Build Your First Visual",
+        "",
+        "1. Add a **Matrix visual** to the canvas",
+        "2. Rows: drag `[Dim] Account` → Account Name (enable hierarchy mode)",
+        "3. Values: drag `Actual Amount`, `Plan Amount`, `Actual vs Plan`, `Actual vs Plan %`",
+        "4. Add a **Slicer** for `[Dim] Date` → Calendar Year",
+        "5. Add a **Slicer** for `[Dim] Scenario` → Scenario Name",
+        "",
+        "Result: a live P&L variance table ready to format and publish.",
+        "",
+        "---",
+        "",
+        "### Step 8 — Update the Model After Changes",
+        "",
+        "If the dataset or measures change: re-run `build_model.py`, open the new BIM in Tabular Editor, press Ctrl+S, Deploy, then Refresh in Power BI Desktop. The full cycle takes under 2 minutes.",
+        "",
+        "---",
+        "",
+        "### Troubleshooting",
+        "",
+        "| Problem | Likely Cause | Fix |",
+        "|---------|-------------|-----|",
+        "| Measures not showing after deploy | Forgot Ctrl+S before Deploy | Re-open BIM → Ctrl+S → Deploy |",
+        "| Measures showing wrong format (decimal instead of %) | PBI_FormatHint annotation missing | Regenerate BIM |",
+        "| Data source error on refresh | DatasetFolder path is wrong | Edit BIM path → redeploy |",
+        "| Measure table empty in Fields pane | Empty columns list — Power BI requires at least one column | Regenerate BIM — Measure table now uses DATATABLE partition with hidden _ column |",
+        "| Deploy option greyed out | Power BI Desktop not open | Open PBI Desktop with blank report → retry |",
+        "| Column tooltips blank | description property missing in BIM column JSON | Regenerate BIM |",
+        "| Table tooltip blank | description property missing in BIM table JSON | Regenerate BIM |",
+    ]
+
+
+def generate_public_model_doc(
+    industry, company, mode, use_cases, persona,
+    tables, relationships, measures,
+    industry_kpi_page, output_folder
+):
+    """
+    Generates the public-facing model guide.
+    Plain business English throughout — no DAX, no JSON, no BIM internals.
+    """
+    import datetime
+    generated_on = datetime.datetime.now().strftime("%d %B %Y %H:%M")
+    year         = datetime.date.today().year
+
+    lines = [
+        f"# {company} — Power BI Semantic Model Guide",
+        f"## Industry    : {industry}",
+        f"## Generated   : {generated_on}",
+        f"## Input Mode  : {mode}",
+        f"## Use Cases   : {', '.join(use_cases)}",
+        f"## End User    : {persona}",
+        f"## Designed & Developed by : Logeshkumar Sivakumar · elogu2001@outlook.com",
+        f"## © {year} Logeshkumar Sivakumar. All rights reserved.",
+        "",
+        "> **About this document**",
+        f"> This guide describes the Power BI semantic model built for {company}.",
+        "> It covers what tables are available, what every measure calculates, and which",
+        "> report pages you can create. Use it as your starting point before opening Power BI Desktop.",
+        ">",
+        f"> © {year} Logeshkumar Sivakumar. All rights reserved.",
+        "> This model design, DAX architecture, and documentation are original intellectual work.",
+        "> Unauthorised reproduction or redistribution without written permission is prohibited.",
+        "",
+        "---",
+        "",
+        "## 1. About This Model",
+        "",
+        _generate_model_intro(company, industry, mode, tables, measures),
+        "",
+        "---",
+        "",
+        "## 2. Tables in This Model",
+        "",
+        "| Table | Type | Description |",
+        "|-------|------|-------------|",
+    ]
+
+    for t in tables:
+        ttype = "Dimension" if t["name"].startswith("[Dim]") else "Fact"
+        lines.append(f"| {t['name']} | {ttype} | {t.get('description', '')[:80]} |")
+    lines.append(f"| Measure | Calculation | All DAX measures — no data rows |")
+    lines += [""]
+
+    for t in tables:
+        lines += [
+            f"### {t['name']}",
+            t.get("description", ""),
+            "",
+        ]
+
+    lines += ["---", "", "## 3. Measures by Folder", ""]
+    for folder_key, folder_measures in _group_by_folder(measures):
+        folder_intro = _folder_intro(folder_key)
+        lines += [f"## {folder_key}", "", folder_intro, "",
+                  "| Measure | Format | What It Answers |",
+                  "|---------|--------|----------------|"]
+        for m in folder_measures:
+            lines.append(f"| {m['name']} | `{m['formatString']}` | {m['description']} |")
+        lines += [""]
+
+    lines += ["---", "", "## 4. Report Pages You Can Build", ""]
+    lines += _generate_report_pages(use_cases, industry, industry_kpi_page)
+
+    lines += ["---", "", "## 5. Getting Started in Power BI Desktop", ""]
+    lines += _getting_started_section()
+
+    lines += ["---", "", "## 6. Use Cases at a Glance", ""]
+    lines += _use_cases_at_glance(use_cases, industry)
+
+    lines += [
+        "---",
+        "",
+        f"© {year} Logeshkumar Sivakumar. All rights reserved.",
+        "This model guide may be shared with report developers and clients "
+        "provided this attribution remains intact.",
+        "Contact: elogu2001@outlook.com",
+    ]
+
+    out_path = os.path.join(output_folder,
+                            f"{industry.lower().replace(' ', '_')}_model_guide_public.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    sz = os.path.getsize(out_path) / 1024
+    print(f"✅ Public model guide  → {out_path}  ({sz:.1f} KB)")
+    return out_path
+
+
+def generate_internal_model_doc(
+    industry, company, mode, use_cases, persona,
+    tables, relationships, relationships_skipped,
+    measures, col_naming_log, description_coverage,
+    input_files, output_folder
+):
+    """
+    Generates the internal technical reference.
+    Full detail: BIM structure, DAX formulas, relationship map, column visibility,
+    description sources, deployment notes.
+    CONFIDENTIAL — not for distribution.
+    """
+    import datetime
+    generated_on = datetime.datetime.now().strftime("%d %B %Y %H:%M")
+    year         = datetime.date.today().year
+
+    lines = [
+        f"# {company} — Power BI Semantic Model — INTERNAL REFERENCE",
+        f"## Industry    : {industry}",
+        f"## Generated   : {generated_on}",
+        f"## Input Mode  : {mode}",
+        f"## Input Files : {', '.join(input_files)}",
+        f"## Use Cases   : {', '.join(use_cases)}",
+        f"## End User    : {persona}",
+        f"## Designed & Developed by : Logeshkumar Sivakumar · elogu2001@outlook.com",
+        f"## © {year} Logeshkumar Sivakumar. All rights reserved.",
+        "## CONFIDENTIAL — NOT FOR DISTRIBUTION",
+        "",
+        "> © {year} Logeshkumar Sivakumar. All rights reserved.",
+        "> CONFIDENTIAL — Internal use only. Do not distribute.",
+        "",
+        "---",
+        "",
+    ]
+
+    lines += _build_summary_section(mode, tables, relationships,
+                                    relationships_skipped, measures,
+                                    description_coverage, input_files, use_cases, persona)
+    lines += _table_reference_section(tables)
+    lines += _relationship_map_section(relationships, relationships_skipped)
+    lines += _full_measure_reference_section(measures)
+    lines += _column_naming_section(col_naming_log)
+    lines += _description_coverage_section(description_coverage)
+    lines += _deployment_notes_section()
+
+    lines += [
+        "---",
+        "",
+        f"CONFIDENTIAL — © {year} Logeshkumar Sivakumar. All rights reserved.",
+        "Internal use only. Do not distribute outside of authorised recipients.",
+        "Contact: elogu2001@outlook.com",
+    ]
+
+    out_path = os.path.join(output_folder,
+                            f"{industry.lower().replace(' ', '_')}_model_guide_internal.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    sz = os.path.getsize(out_path) / 1024
+    print(f"✅ Internal model guide → {out_path}  ({sz:.1f} KB)")
+    return out_path
+```
+
+---
+
+## Final Print Summary
+
+```
+═══════════════════════════════════════════════════════════
+  PBIX Model Builder — Logeshkumar Sivakumar
+  elogu2001@outlook.com
+═══════════════════════════════════════════════════════════
+  Mode       : [Integrated — from dataset creator CSVs]
+               [Standalone — from uploaded PBIX + description files]
+  Industry   : [industry]
+  Company    : [company]
+  Persona    : [persona]
+  Use Cases  : [list of selected use cases]
+  Generated  : [datetime]
+
+  INPUT SOURCES
+  ─────────────────────────────────────────────────────────
+  [Mode 1]
+  CSV folder     : [path]   ([N] tables found)
+  Dataset pub doc: ✅ / ⚠️ not found
+  Dataset int doc: ✅ / ⚠️ not found
+
+  [Mode 2]
+  PBIX file      : [filename]   ([N] tables from DiagramLayout)
+  Description doc: ✅ / ⚠️ not uploaded
+  Column CSVs    : ✅ [N] CSVs / ⚠️ none — using catalogue + auto-describe
+
+  OUTPUT FILES
+  ─────────────────────────────────────────────────────────
+  ✅ model.bim                              [file_size]
+  ✅ build_model.py                         [file_size]
+  ✅ [industry]_model_guide_public.md       [file_size]
+  ✅ [industry]_model_guide_internal.md     [file_size]
+  ✅ measures_reference.md                  [file_size]
+
+  MODEL SUMMARY
+  ─────────────────────────────────────────────────────────
+  Tables        : [count]  ([N] dims  [N] facts  1 measure table)
+  Relationships : [count] defined  /  [N] skipped (tables absent)
+  Measures      : [count] across [N] / 14 folders
+  Hidden cols   : [count]  (FK + technical columns)
+  Described cols: [N] internal doc / [N] public doc /
+                  [N] built-in catalogue / [N] auto-described
+
+  REPORT PAGES SUGGESTED (see public guide Section 4)
+  ─────────────────────────────────────────────────────────
+  Page 1 — Executive Summary              (always)
+  Page 2 — Variance Analysis              (always)
+  Page 3 — Revenue & Sales                (if selected)
+  Page 4 — Cost & Expense Analysis        (if selected)
+  Page 5 — Forecasting & Full Year        (if selected)
+  Page 6 — Scenario Comparison            (if selected)
+  Page 7 — Rolling & Period Trends        (if selected)
+  Page 8 — YTD Performance                (if selected)
+  Page 9 — Ranking & Pareto               (if selected)
+  Page N — [Industry KPI Page]            (always)
+
+  NEXT STEPS
+  ─────────────────────────────────────────────────────────
+  1. Open Tabular Editor 2 or 3
+  2. File → Open from File → select model.bim
+  3. Model → Deploy → choose Power BI Desktop instance
+  4. Open [industry]_model_guide_public.md → Section 4 for report page blueprints
+
+  © 2026 Logeshkumar Sivakumar. All rights reserved.
+═══════════════════════════════════════════════════════════
+```
+
+---
+
+## Table & Column Description Catalogue
+
+Every table and column must have a `description` property in the BIM file.
+Descriptions appear in Power BI Desktop's field list tooltip and in documentation tools.
+Apply these verbatim — they are written in plain business English for end report users.
+
+**BIM JSON pattern for table description:**
+```json
+{ "name": "[Dim] Account", "description": "...", "columns": [...] }
+```
+
+**BIM JSON pattern for column description:**
+```json
+{ "name": "Account Code", "description": "...", "dataType": "string" }
+```
+
+---
+
+### Table Descriptions
+
+| Table (Display Name) | Description |
+|---------------------|-------------|
+| `[Dim] Date` | Calendar reference table covering Jan 2020 to Dec 2026. Used to filter and group all fact data by day, month, quarter, and year. Every fact table joins to this table on its date column. |
+| `[Dim] Account` | Chart of accounts for the P&L hierarchy. Organises all financial line items from revenue through to net profit using a parent-child structure. Each leaf account directly receives amounts from a source transaction table. |
+| `[Dim] Business Unit` | Three-level organisational hierarchy — Company → Business Unit → Division. Used to slice financial and operational data by the internal structure of the business. |
+| `[Dim] Department` | Three-level cost centre hierarchy — Division → Department → Team. Provides the staffing and cost allocation dimension for payroll and expense reporting. |
+| `[Dim] Geography` | Four-level location hierarchy — Region → Country → State → City. Used across all financial and operational fact tables to analyse performance by location. |
+| `[Dim] Product` | Three-level product hierarchy — Category → Sub-Category → Product. Each leaf product has a unique alphanumeric code and is linked to sales and operational metrics. |
+| `[Dim] Customer` | Three-level customer hierarchy — Parent Company → Subsidiary → Division. Leaf nodes represent the billable entity and carry contract, segment, and credit attributes. |
+| `[Dim] Supplier` | Three-level supplier hierarchy — Parent Group → Subsidiary → Supplier Unit. Leaf nodes represent the transacting supplier and carry category, rating, and lead time attributes. |
+| `[Dim] Employee` | Full employee master with self-referencing org chart. Each row represents one employee with their grade, department, salary band, and direct manager reference used to build the reporting hierarchy. |
+| `[Dim] Asset` | Fixed asset register with three-level hierarchy — Asset Category → Sub-Category → Asset. Each leaf asset carries its acquisition cost, useful life, and monthly depreciation schedule. |
+| `[Dim] Scenario` | Planning scenario reference table. Distinguishes between Actual (reported), Plan (annual budget), Forecast (mid-year estimate), and Revised Forecast (Q3 update) across all financial data. |
+| `[Dim] Customer Segment` | Standalone segment classification — Enterprise, Mid-Market, or SMB. Used to group customers by size and buying behaviour without navigating the full customer hierarchy. |
+| `[Dim] Macro Event` | Reference table of real-world macro events (economic shocks, pandemics, geopolitical events, commodity spikes) that affected the company's financials between 2020 and 2026. Each event includes its intensity, duration, and the P&L lines it impacted. |
+| `[Fact] Financial` | Monthly P&L summary — the primary reporting fact table. Every row represents one account × one business unit × one geography × one month of aggregated financial data. Amounts are derived by rolling up the source transaction tables, not entered independently. |
+| `[Fact] Plan` | Monthly planning data for all three planning scenarios — Plan, Forecast, and Revised Forecast. Same grain as [Fact] Financial. Used for variance analysis, scenario comparison, and full-year estimates. |
+| `[Fact] Invoice Line` | Daily sales transaction table at invoice line level. One row per product per order. Source for all revenue P&L lines and for commercial metrics such as discount rate, average selling price, and revenue mix. |
+| `[Fact] Purchase Order` | Daily procurement transaction table at PO line level. One row per material or service per order. Source for COGS raw material and direct procurement lines in the P&L. |
+| `[Fact] Payroll` | Monthly payroll run table at employee level. One row per employee per payroll cycle. Source for all staff cost P&L lines across direct labour and OPEX. |
+| `[Fact] Expense Claim` | Daily expense submission table at claim line level. Source for travel, marketing, and general & administrative OPEX lines. Each row carries the expense category used to route it to the correct P&L account. |
+| `[Fact] Depreciation` | Monthly depreciation schedule at asset level. One row per asset per month. Source for the depreciation and amortisation P&L line. Amounts are computed from the asset's cost and useful life in [Dim] Asset. |
+| `[Fact] Asset Maintenance` | Per-event maintenance cost table. One row per maintenance activity per asset. Source for the maintenance and repair OPEX line. Distinguishes preventive, corrective, and emergency maintenance. |
+| `[Fact] Utility` | Monthly utility consumption and cost table at location level. One row per utility type per location per month. Source for the utilities OPEX line. |
+| `[Fact] Tax` | Monthly tax liability table at business unit level. One row per tax type per entity per month. Source for the tax expense line in the P&L. |
+| `[Fact] CapEx` | Capital expenditure transaction table for capital-intensive industries. One row per spend event or approval milestone. Tracks investment against approved budgets and links to the asset being constructed or acquired. |
+| `[Fact] Journal Entry` | Monthly catch-all journal entry table for P&L accounts that have no natural transaction source — including interest, FX, provisions, accruals, and royalties. Every leaf account in [Dim] Account is covered either by a source transaction table or by this table. |
+| `[Fact] Operational` | Industry-specific daily operational metrics table. Content varies by industry — hotel room occupancy, manufacturing production output, patient visits, shipment volumes, etc. Source for industry-specific KPIs and, in some industries, for direct cost P&L lines. |
+| `[Fact] Macro Event Impact` | Monthly quantified impact of each macro event on each P&L account. Links [Dim] Macro Event to [Dim] Account and [Dim] Date. Enables analysis of how much of a variance was driven by an external shock versus internal performance. |
+| `Measure` | Calculation table containing all DAX measures. This table has no rows or data columns — it exists only to organise business logic into display folders separate from the raw data tables. |
+
+---
+
+### Column Descriptions — Dimension Tables
+
+#### [Dim] Date
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | The calendar date. Every fact table joins to this column. |
+| `Year Month` | Year and month combined as an integer (e.g., 202401). Used for sorting time-series visuals in the correct order. |
+| `Year Month Label` | Human-readable month label (e.g., "Jan 2024"). Used on report axes and card visuals. |
+| `Calendar Year` | Four-digit calendar year (e.g., 2024). |
+| `Calendar Quarter` | Quarter number within the year — 1, 2, 3, or 4. |
+| `Quarter Label` | Quarter formatted as a label (e.g., "Q1 2024"). Used on report axes. |
+| `Month Number` | Month number within the year — 1 through 12. Used for sorting month labels. |
+| `Month Name` | Full month name (e.g., "January"). |
+| `Month Short Name` | Three-letter month abbreviation (e.g., "Jan"). Used on compact chart axes. |
+| `Day of Week` | Day number within the week — 1 (Sunday) through 7 (Saturday). |
+| `Day Name` | Full day name (e.g., "Monday"). |
+| `Week Number` | ISO week number within the year. |
+| `Is Weekend` | "Yes" if Saturday or Sunday; "No" for weekdays. Useful for operational analysis with weekday/weekend patterns. |
+| `Is Month End` | "Yes" if this date is the last day of the month. Used to select month-end snapshots. |
+| `Fiscal Year` | Fiscal year label if the company's financial year differs from the calendar year. |
+| `Fiscal Quarter` | Fiscal quarter number within the fiscal year. |
+| `Fiscal Month` | Month number within the fiscal year. |
+
+---
+
+#### [Dim] Account
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Account Key` | Unique integer identifier for each account. Root accounts (Level 1) have the lowest keys. Used in PATH() hierarchy calculations. |
+| `Parent Account Key` | The Account Key of this account's parent in the P&L hierarchy. Null for root-level accounts such as Revenue, COGS, and OPEX. |
+| `Account Code` | Alphanumeric code following the industry's chart of accounts convention (e.g., REV-SUB, OPEX-STAFF). Unique per leaf account. |
+| `Account Name` | Full descriptive name of the account as used in financial reporting (e.g., "Subscription Revenue", "Direct Labour Cost"). |
+| `Account Short Name` | Abbreviated name used in report column headers and compact visuals. |
+| `Account Type` | High-level classification of the account — Revenue, COGS, OpEx, CapEx, Depreciation, Finance, Tax, or Statistical. |
+| `Account Sub Type` | Finer classification within Account Type (e.g., "SubscriptionRevenue" under Revenue, "DirectLabour" under COGS). |
+| `Financial Statement` | Which financial statement this account belongs to — Income Statement, Balance Sheet, Cash Flow, or Statistical. |
+| `Account Hierarchy Path` | Pipe-delimited path of Account Keys from root to this account (e.g., "1|5|12"). Used by DAX PATH() functions to build the account drill-down. Hidden from the field list. |
+| `Account Depth` | Depth of this account in the hierarchy — 1 for root accounts, 2 for groups, 3 for sub-groups, 4 for leaf posting accounts. Derived from Account Hierarchy Path. |
+| `Account Level` | Display-friendly version of Account Depth. Identical in value — use in slicers where "Level 2" reads better than "Depth 2". |
+| `Is Leaf` | "Yes" for posting accounts that directly receive financial amounts. "No" for rollup nodes that aggregate their children. Only leaf accounts appear in source transaction tables. |
+| `Is Calculated` | "Yes" for computed subtotals in the reporting layer (e.g., Gross Profit, EBITDA). "No" for standard data-driven accounts. |
+| `Normal Balance` | Whether this account naturally carries a Debit or Credit balance under double-entry bookkeeping. |
+| `Sign Convention` | +1 or −1. Applied when displaying amounts in the P&L to show costs as negative values and revenue as positive. |
+| `CapEx OpEx` | Whether the account represents Capital Expenditure, Operating Expenditure, both, or neither. Critical for CapEx-intensive industries. |
+| `Cash Non Cash` | Whether the account involves cash movements (Cash), non-cash items such as depreciation and provisions (NonCash), or both. |
+| `Variable Fixed` | Cost behaviour classification — Variable (moves with volume), Fixed (does not move with volume), Semi-Fixed, or Not Applicable for revenue accounts. |
+| `Industry Tag` | Industry-specific label for accounts that have a non-standard name in that sector (e.g., "Lifting Cost" for Oil & Gas, "RevPAR" for Hotels, "ASK-based" for Airlines). |
+| `Reporting Standard` | The accounting or industry standard that defines this account (e.g., IFRS, US GAAP, USALI for hotels, HFMA for healthcare). |
+| `Sort Order` | Display sequence of this account within its siblings. Controls the order accounts appear in P&L visuals. |
+| `Level 1 Key` | Account Key of the root ancestor (top-level P&L category) for this account. |
+| `Level 1 Name` | Name of the root ancestor — the top-level P&L category this account rolls up to. |
+| `Level 2 Key` | Account Key of the Level 2 ancestor. Null if this account is at Level 1 or 2. |
+| `Level 2 Name` | Name of the Level 2 ancestor group. |
+| `Level 3 Key` | Account Key of the Level 3 ancestor. Null if this account is at Level 1, 2, or 3. |
+| `Level 3 Name` | Name of the Level 3 ancestor sub-group. |
+
+---
+
+#### [Dim] Business Unit
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Business Unit Key` | Unique integer identifier. Used in PATH() hierarchy calculations and as the FK in all fact tables. |
+| `Parent Business Unit Key` | Business Unit Key of the parent in the hierarchy. Null for the root company node. |
+| `Business Unit Code` | Alphanumeric code for the business unit (e.g., BU-ENT-DIV-APAC). |
+| `Business Unit Name` | Full name of the company, business unit, or division. |
+| `Business Unit Level` | Position in the hierarchy — Company (Level 1), Business Unit (Level 2), or Division (Level 3). |
+| `Business Unit Level Num` | Numeric version of Business Unit Level — 1, 2, or 3. Used for sorting and filtering by level. |
+| `Hierarchy Path` | Pre-computed pipe-delimited path for DAX PATH() functions. Hidden from the field list. |
+| `Hierarchy Level` | Depth of this node in the hierarchy. Derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for the lowest-level division nodes that appear in fact tables. "No" for company and BU rollup nodes. |
+| `Profit Centre` | "Yes" if this unit is measured as a profit centre with its own P&L. "No" for cost-centre-only units. |
+| `Cost Centre Code` | Alphanumeric code used in finance systems to identify this unit's cost centre. |
+| `Level 1 Key` / `Level 1 Name` | Company-level ancestor identifier and name. |
+| `Level 2 Key` / `Level 2 Name` | Business Unit–level ancestor identifier and name. |
+| `Level 3 Key` / `Level 3 Name` | Division-level identifier and name. Null for company and BU rows. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Department
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Department Key` | Unique integer identifier for this department or team node. |
+| `Parent Department Key` | Department Key of the parent. Null for root division nodes. |
+| `Department Code` | Alphanumeric cost centre code (e.g., DIV-FIN, DEPT-ACC, TEAM-AP). |
+| `Department Name` | Full name of the division, department, or team. |
+| `Department Level` | Position in the hierarchy — Division, Department, or Team. |
+| `Department Level Num` | Numeric version — 1, 2, or 3. |
+| `Hierarchy Path` | Pre-computed PATH() string. Hidden from the field list. |
+| `Hierarchy Level` | Depth derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for team-level nodes that appear in payroll and expense facts. |
+| `Cost Centre Code` | Finance system code at department or team level. |
+| `Head Of Department Key` | Employee Key of the department or team head. Links to [Dim] Employee. |
+| `Business Unit Key` | The business unit that owns this department. Links to [Dim] Business Unit. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Geography
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Geography Key` | Unique integer identifier. All fact tables store the lowest applicable geography (city where known). |
+| `Parent Geography Key` | Geography Key of the parent. Null for top-level region nodes. |
+| `Geography Code` | Structured alphanumeric code reflecting the path (e.g., GEO-NA-US-CA-SF). |
+| `Geography Name` | Name of the region, country, state, or city. |
+| `Geography Level` | Position in the hierarchy — Region, Country, State, or City. |
+| `Geography Level Num` | Numeric version — 1 through 4. |
+| `ISO Country Code` | Two-letter ISO 3166 country code. Populated at country level and below. |
+| `ISO State Code` | State or province code. Populated at state level and below. |
+| `Latitude` | Approximate centre-point latitude. Used for map visuals. |
+| `Longitude` | Approximate centre-point longitude. Used for map visuals. |
+| `Time Zone` | IANA time zone identifier (e.g., America/New_York, Asia/Kolkata). |
+| `Currency Code` | Default reporting currency for this geography. |
+| `Hierarchy Path` | Pre-computed PATH() string. Hidden from the field list. |
+| `Hierarchy Level` | Depth derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for city-level nodes that appear in fact tables. |
+| `Level 1 Key` / `Level 1 Name` | Region ancestor. |
+| `Level 2 Key` / `Level 2 Name` | Country ancestor. |
+| `Level 3 Key` / `Level 3 Name` | State/Province ancestor. Null above state level. |
+| `Level 4 Key` / `Level 4 Name` | City. Null above city level. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Product
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Product Key` | Unique integer identifier used in PATH() hierarchy and as FK in sales fact tables. |
+| `Parent Product Key` | Product Key of the parent. Null for top-level category nodes. |
+| `Product Code` | Alphanumeric code assigned to leaf products only (e.g., SAS-CP-001). Used in SuperFilter regex matching. |
+| `Product Name` | Name of the category, sub-category, or individual product. |
+| `Product Level` | Position in the hierarchy — Category, Sub-Category, or Product. |
+| `Product Level Num` | Numeric version — 1, 2, or 3. |
+| `Hierarchy Path` | Pre-computed PATH() string. Hidden from the field list. |
+| `Hierarchy Level` | Depth derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for individual product nodes that appear in sales and operational facts. |
+| `SKU` | Stock-keeping unit code. Leaf products only. |
+| `Unit Of Measure` | Unit in which this product is sold or consumed (e.g., Each, Licence, Kg). |
+| `Base Price` | Standard selling price per unit at the leaf product level. |
+| `Standard Cost` | Standard cost per unit used for margin calculations. |
+| `Is Active` | "Yes" if the product is currently sold; "No" if discontinued. |
+| `Level 1 Key` / `Level 1 Name` | Category ancestor. |
+| `Level 2 Key` / `Level 2 Name` | Sub-Category ancestor. |
+| `Level 3 Key` / `Level 3 Name` | Leaf product. Null for category and sub-category rows. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Customer
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Customer Key` | Unique integer identifier. Fact tables reference the lowest applicable billing entity. |
+| `Parent Customer Key` | Customer Key of the parent company or subsidiary. Null for ultimate parent nodes. |
+| `Customer ID` | Alphanumeric display code assigned to leaf billing entities (e.g., CUS-ENT-0088). |
+| `Customer Name` | Name of the parent company, subsidiary, or billing division. |
+| `Customer Level` | Position in the hierarchy — Parent Company, Subsidiary, or Division. |
+| `Customer Level Num` | Numeric version — 1, 2, or 3. |
+| `Hierarchy Path` | Pre-computed PATH() string. Hidden from the field list. |
+| `Hierarchy Level` | Depth derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for billing entities that appear in invoice fact rows. |
+| `Customer Segment` | Business size classification of the leaf entity — Enterprise, Mid-Market, or SMB. |
+| `Industry` | The industry sector of this customer organisation. |
+| `Geography Key` | Links to [Dim] Geography at the leaf entity's billing location. Hidden — used for relationship only. |
+| `Account Manager Key` | Employee Key of the assigned account manager. Links to [Dim] Employee. |
+| `Contract Start Date` | Start date of the active contract for leaf entities. |
+| `Contract End Date` | End date of the contract. Null for open-ended agreements. |
+| `Payment Terms Days` | Number of days from invoice date to payment due date. |
+| `Credit Limit` | Maximum outstanding balance approved for this customer. |
+| `Annual Contract Value` | Total annual committed spend for this entity. Rolls up to parent via hierarchy. |
+| `Customer Status` | Current status — Active, At Risk, or Churned. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Supplier
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Supplier Key` | Unique integer identifier. Fact tables reference the transacting supplier unit. |
+| `Parent Supplier Key` | Supplier Key of the parent group or subsidiary. Null for ultimate parent nodes. |
+| `Supplier ID` | Alphanumeric code for leaf supplier units (e.g., SUP-RAW-0033). |
+| `Supplier Name` | Name of the parent group, subsidiary, or supplier unit. |
+| `Supplier Level` | Position in the hierarchy — Parent Group, Subsidiary, or Supplier Unit. |
+| `Supplier Level Num` | Numeric version — 1, 2, or 3. |
+| `Hierarchy Path` | Pre-computed PATH() string. Hidden from the field list. |
+| `Hierarchy Level` | Depth derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for transacting supplier units that appear in purchase order rows. |
+| `Supplier Category` | Type of goods or services supplied — Raw Material, Services, IT, Logistics, or Utilities. |
+| `Geography Key` | Links to [Dim] Geography at the supplier's operating location. Hidden — used for relationship only. |
+| `Payment Terms Days` | Number of days from invoice to payment. |
+| `Contract Type` | Whether this supplier is Preferred, Approved, or Spot-buy only. |
+| `Lead Time Days` | Average number of days from purchase order to delivery. |
+| `Supplier Rating` | Performance rating — A (highest), B, or C. |
+| `Annual Spend` | Total annual spend with this supplier unit. Rolls up to parent group. |
+| `Status` | Current supplier status — Active, Blacklisted, or Under Review. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Employee
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Employee Key` | Unique integer identifier. Used in the self-referencing org chart PATH() hierarchy. |
+| `Manager Employee Key` | Employee Key of this person's direct manager. Null for C-suite (root) employees only. Hidden — used for relationship only. |
+| `Employee ID` | Human-readable display code (e.g., EMP-FIN-0042). |
+| `Full Name` | First and last name of the employee. |
+| `Gender` | Self-reported gender — Male, Female, or Non-Binary. |
+| `Date Of Birth` | Employee's date of birth. Age ranges from 22 to 60. |
+| `Nationality Code` | ISO two-letter country code of the employee's nationality. |
+| `Marital Status` | Marital status — Single, Married, or Other. |
+| `Contact Email` | Work email address in firstname.lastname@company.com format. |
+| `Job Title` | Current job title (e.g., Senior Financial Analyst). |
+| `Job Grade` | Seniority grade from L1 (entry-level) to L8 (C-suite). |
+| `Job Grade Num` | Numeric version of Job Grade — 1 through 8. Used for sorting and hierarchy depth. |
+| `Job Family` | Broad functional area — Finance, Sales, Operations, Technology, HR, or Legal. |
+| `Employment Type` | Contract arrangement — Full-Time, Part-Time, Contract, or Intern. |
+| `Contract Type` | Nature of employment — Permanent, Fixed-Term, or Freelance. |
+| `Department Key` | Links to [Dim] Department at the team level. Hidden — used for relationship only. |
+| `Business Unit Key` | Links to [Dim] Business Unit at the division level. Hidden — used for relationship only. |
+| `Geography Key` | Work location. Links to [Dim] Geography at city level. Hidden — used for relationship only. |
+| `Joining Date` | Date the employee joined the company. |
+| `Confirmation Date` | Probation completion date — typically Joining Date + 3 to 6 months. Null for contractors. |
+| `Skills` | Comma-separated list of professional skills (e.g., "Python, SQL, Data Analysis"). |
+| `Certification Tags` | Professional certifications held (e.g., "CPA, CFA, PMP"). |
+| `Annual Base Salary` | Annual basic salary in reporting currency, by job grade and geography. |
+| `Salary Band` | The salary band range this role falls into (e.g., "Band 4: 60,000–80,000 USD"). |
+| `Bonus Eligible` | "Yes" if the employee is eligible for a performance bonus. |
+| `Variable Pay Pct` | Percentage of base salary payable as variable compensation — 0% to 30% depending on grade. |
+| `Benefits Cost` | Monthly employer cost of benefits — health insurance, pension, and other contributions. |
+| `Employer Tax Rate` | Employer payroll tax rate in the employee's country (e.g., 0.075 for India, 0.145 for US). |
+| `Status` | Current employment status — Active, On Leave, Resigned, or Terminated. |
+| `Exit Date` | Date of departure. Populated only for Resigned or Terminated employees. |
+| `Exit Reason` | Reason for departure — Voluntary, Involuntary, Retirement, or Contract End. |
+| `Org Hierarchy Path` | Pre-computed PATH() string from the CEO to this employee (e.g., "1|4|12|45"). Used in DAX PATHCONTAINS() and PATHITEM() functions. Hidden from the field list. |
+| `Org Depth` | Number of levels from the CEO to this employee. 1 = CEO, 2 = direct report, and so on. |
+| `Org Level 1 Key` / `Org Level 1 Name` | The C-suite ancestor at the top of this employee's reporting line. |
+| `Org Level 2 Key` / `Org Level 2 Name` | The L7-grade ancestor. Null if the employee is within 1 level of the CEO. |
+| `Org Level 3 Key` / `Org Level 3 Name` | The L6-grade ancestor. Null if depth < 3. |
+| `Org Level 4 Key` / `Org Level 4 Name` | The L5-grade ancestor. Null if depth < 4. |
+
+---
+
+#### [Dim] Asset
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Asset Key` | Unique integer identifier for this asset in the fixed asset register. |
+| `Parent Asset Key` | Asset Key of the parent category or sub-category. Null for top-level category nodes. |
+| `Asset Code` | Alphanumeric code for the asset (e.g., ASSET-IT-0045). Leaf assets only. |
+| `Asset Name` | Name of the asset category, sub-category, or individual asset (e.g., "Server Rack 12 — Chennai DC"). |
+| `Asset Level` | Position in the hierarchy — Asset Category, Sub-Category, or Asset. |
+| `Asset Level Num` | Numeric version — 1, 2, or 3. |
+| `Hierarchy Path` | Pre-computed PATH() string. Hidden from the field list. |
+| `Hierarchy Level` | Depth derived from Hierarchy Path. |
+| `Is Leaf` | "Yes" for individual asset rows that have a depreciation schedule. |
+| `Asset Type` | Classification — Tangible (physical), Intangible (software, IP), or Right-Of-Use (lease). |
+| `Acquisition Date` | Date the asset was purchased or put into service. |
+| `Acquisition Cost` | Original cost of the asset at acquisition. |
+| `Useful Life Months` | Expected useful life of the asset in months. Used to compute monthly depreciation. |
+| `Depreciation Method` | Accounting method — Straight-Line, Declining Balance, or Units of Production. |
+| `Depreciation Per Month` | Pre-computed monthly depreciation charge (Acquisition Cost ÷ Useful Life Months for straight-line). |
+| `Residual Value` | Estimated value at the end of useful life. |
+| `Department Key` | Department or cost centre responsible for this asset. Hidden — used for relationship only. |
+| `Geography Key` | Physical location of the asset. Hidden — used for relationship only. |
+| `Is Active` | "Yes" if the asset is currently in service. "No" if disposed or retired. |
+| `Disposal Date` | Date of disposal or retirement. Null for active assets. |
+| `Sort Order` | Display sequence within siblings. |
+
+---
+
+#### [Dim] Scenario
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Scenario Key` | Unique integer identifier — 1 = Actual, 2 = Plan, 3 = Forecast, 4 = Revised Forecast. |
+| `Scenario Name` | Display name used in all DAX CALCULATE filters (e.g., "Actual", "Plan", "Forecast", "Revised Forecast"). |
+| `Scenario Type` | Broad classification — Actual (reported data) or Plan (forward-looking estimate). |
+| `Scenario Description` | Plain English description of when and how this scenario was prepared. |
+| `Sort Order` | Controls scenario order in slicers — Actual, Plan, Forecast, Revised Forecast. |
+
+---
+
+#### [Dim] Macro Event
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Macro Event Key` | Unique integer identifier for each macro event. |
+| `Event Code` | Short code for the event (e.g., EVT-001). |
+| `Event Name` | Full descriptive name (e.g., "COVID-19 Global Pandemic", "Russia-Ukraine Conflict"). |
+| `Event Category` | Type of event — Pandemic, Geopolitical, Commodity, Regulatory, Demand Shift, Financial, or Natural Disaster. |
+| `Start Date` | First month the event began affecting financial results. |
+| `Peak Impact Date` | Month when the event's impact on this industry was at its most severe. |
+| `Recovery Start Date` | Month when conditions began to improve after the peak. |
+| `Estimated End Date` | Month the event's impact returned to normal. Null if the event is still ongoing in 2026. |
+| `Is Ongoing` | "Yes" if the event continues to affect results as of the end of the dataset (Dec 2026). |
+| `Global Impact Summary` | Two to three sentence description of the event's worldwide effect, sourced from research. |
+| `Industry Impact Summary` | Specific impact on this industry with quantified figures from industry reports. |
+| `Primary Affected Metrics` | Comma-separated list of the P&L lines and KPIs most affected by this event. |
+| `Shock Multiplier` | The peak revenue or cost multiplier applied — e.g., −0.45 means a 45% reduction at peak. |
+| `Recovery Months` | Number of months from peak impact to normalisation. 0 means the shift was permanent. |
+| `Intensity` | Severity classification — Light, Moderate, or Severe. |
+| `Source Title` | Title of the research article or report used to quantify this event. |
+| `Source URL` | Direct URL to the source. |
+| `Source Publisher` | Publisher of the source (e.g., IMF, Reuters, STR Global). |
+| `Published Date` | Date the source was published. |
+
+---
+
+### Column Descriptions — Fact Tables
+
+#### [Fact] Financial
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month this row represents. All rows are monthly summaries. |
+| `Business Unit Key` | Links to [Dim] Business Unit at division level. Hidden — used for relationship only. |
+| `Department Key` | Links to [Dim] Department at team level. Hidden — used for relationship only. |
+| `Geography Key` | Links to [Dim] Geography at the lowest applicable level. Hidden — used for relationship only. |
+| `Product Key` | Links to [Dim] Product for revenue and COGS accounts. Null for non-product accounts. Hidden — used for relationship only. |
+| `Scenario Key` | Links to [Dim] Scenario — always 1 (Actual) in this table. Hidden — used for relationship only. |
+| `Account Key` | Links to [Dim] Account leaf node. Determines which P&L line this row contributes to. Hidden — used for relationship only. |
+| `Amount` | The financial amount for this combination of account, business unit, geography, and month. Derived by aggregating the corresponding source transaction table. |
+| `Data Type` | "Historical" for 2020–2025 rows derived from simulated transactions; "Predicted" for 2026 rows based on trend extrapolation. |
+| `Prediction Confidence` | Quality of the 2026 prediction — High, Medium, or Low. Null for all historical (2020–2025) rows. |
+| `Source Table` | The source transaction table this row was aggregated from (e.g., "FactSalesOrder", "FactPayroll"). Used for drill-through in Inforiver reports. |
+
+---
+
+#### [Fact] Plan
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month this planning row represents. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Geography Key` | Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Scenario Key` | Links to [Dim] Scenario — 2 (Plan), 3 (Forecast), or 4 (Revised Forecast). Hidden — used for relationship only. |
+| `Account Key` | Links to [Dim] Account leaf node. Hidden — used for relationship only. |
+| `Amount` | The planned, forecast, or revised forecast amount for this account and period. |
+| `Submitted By` | The team or individual who submitted this planning value (e.g., "Finance HQ", "North America Lead"). |
+| `Approval Status` | The workflow state of this planning submission — Draft, Submitted, or Approved. |
+
+---
+
+#### [Fact] Invoice Line
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Order ID` | Unique identifier for the parent sales order (e.g., ORD-2024-00452). |
+| `Order Line ID` | Unique identifier for this individual line within the order (e.g., ORD-2024-00452-L01). |
+| `Order Date` | Calendar date the order was placed. Daily grain. |
+| `Invoice Date` | Date the invoice was issued — typically 1 to 15 days after the order date. |
+| `Due Date` | Payment due date — Invoice Date plus the customer's payment terms. |
+| `Customer Key` | Links to [Dim] Customer at the billing entity level. Hidden — used for relationship only. |
+| `Product Key` | Links to [Dim] Product at the individual product level. Hidden — used for relationship only. |
+| `Geography Key` | Delivery or service location. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Business Unit Key` | The selling business unit. Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Sales Rep Key` | Employee Key of the sales representative who closed this order. Links to [Dim] Employee. Hidden. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Quantity` | Number of units, licences, or service hours sold on this line. |
+| `Unit Price` | List price per unit before any discount. |
+| `Gross Amount` | Total amount before discount — Quantity × Unit Price. |
+| `Discount Pct` | Discount percentage applied to this line as a proportion (e.g., 0.10 = 10%). |
+| `Discount Amount` | Monetary value of the discount — Gross Amount × Discount Pct. |
+| `Net Amount` | Revenue recognised on this line after discount — Gross Amount minus Discount Amount. This value feeds the revenue P&L lines. |
+| `Tax Amount` | Sales tax or VAT applied to this line. |
+| `Total Amount` | Customer-facing total — Net Amount plus Tax Amount. |
+| `Revenue Type` | Sub-classification of revenue used to route to the correct P&L account — Subscription, One-Time, Services, or Recurring. |
+| `Payment Status` | Current payment state of this invoice line — Paid, Outstanding, or Overdue. |
+
+---
+
+#### [Fact] Purchase Order
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `PO ID` | Unique identifier for the purchase order (e.g., PO-2024-00211). |
+| `PO Line ID` | Unique identifier for this individual line within the PO. |
+| `Order Date` | Date the purchase order was raised. |
+| `Delivery Date` | Date goods or services were received — Order Date plus the supplier's lead time. |
+| `Supplier Key` | Links to [Dim] Supplier at the transacting unit level. Hidden — used for relationship only. |
+| `Product Key` | The material or service purchased. Links to [Dim] Product. Hidden — used for relationship only. |
+| `Department Key` | The requesting department. Links to [Dim] Department. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Quantity` | Quantity of goods or services ordered on this line. |
+| `Unit Cost` | Cost per unit of the item purchased. |
+| `Total Cost` | Total cost for this line — Quantity × Unit Cost. This value feeds the COGS P&L lines. |
+| `PO Category` | Type of purchase — Raw Material, Packaging, IT, Services, or Utilities. Routes this line to the correct COGS account. |
+| `GRN Status` | Goods Receipt Note status — Pending, Received, or Partially Received. |
+| `Invoice Status` | Supplier invoice processing status — Pending, Invoiced, or Paid. |
+
+---
+
+#### [Fact] Payroll
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Payroll Run ID` | Unique identifier for the payroll run (e.g., PR-2024-01). |
+| `Date` | Payroll processing date — first of the month. |
+| `Employee Key` | Links to [Dim] Employee. Hidden — used for relationship only. |
+| `Department Key` | Links to [Dim] Department. Hidden — used for relationship only. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Geography Key` | Work location. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Basic Salary` | Monthly basic salary for this employee in this payroll run. |
+| `Variable Pay` | Bonus, commission, or incentive payment in this period. |
+| `Overtime` | Additional pay for hours worked beyond contracted hours. |
+| `Allowances` | Non-taxable allowances — housing, transport, meal, and similar. |
+| `Gross Earnings` | Total employee earnings — Basic Salary + Variable Pay + Overtime + Allowances. |
+| `Employee Tax Deduction` | Income tax and statutory deductions withheld from the employee's pay. |
+| `Other Deductions` | Provident fund, insurance premiums, and other voluntary deductions. |
+| `Net Pay` | Amount transferred to the employee — Gross Earnings minus all deductions. |
+| `Employer PF Contribution` | Employer's provident fund or pension contribution. Not visible in the employee's pay slip. |
+| `Employer Health Insurance` | Employer's share of health insurance premiums. |
+| `Employer Other Benefits` | Other employer-paid benefits such as life insurance and wellness programmes. |
+| `Total Employer Cost` | Total cost to the company for this employee in this period — Gross Earnings plus all employer contributions. This value feeds the staff cost P&L lines. |
+| `Cost Category` | Determines which P&L account this employee's cost maps to — Direct Labor (COGS), Sales Staff, Support Staff, or Management (all OPEX). |
+
+---
+
+#### [Fact] Expense Claim
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Claim ID` | Unique identifier for the expense claim (e.g., EXP-2024-00891). |
+| `Claim Date` | Date the expense was incurred. |
+| `Employee Key` | Links to [Dim] Employee — the person who incurred the expense. Hidden — used for relationship only. |
+| `Department Key` | Links to [Dim] Department — the cost centre charged. Hidden — used for relationship only. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Geography Key` | Location where the expense was incurred. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Expense Category` | High-level category that routes the claim to a P&L account — Travel, Meals, Accommodation, Marketing, Training, or Office. |
+| `Expense Sub Category` | Finer classification within Expense Category (e.g., "Domestic Flight", "Client Entertainment"). |
+| `Amount` | Original claim amount in the currency it was incurred. |
+| `Currency Code` | The currency the expense was originally incurred in. |
+| `Reporting Amount` | Amount converted to the company's reporting currency. This value feeds the OPEX P&L lines. |
+| `Approval Status` | Current workflow status — Pending, Approved, or Rejected. |
+| `Policy Compliant` | "Yes" if the claim is within company expense policy limits; "No" if it exceeds the threshold. |
+
+---
+
+#### [Fact] Depreciation
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month for this depreciation charge. |
+| `Asset Key` | Links to [Dim] Asset at the individual asset level. Hidden — used for relationship only. |
+| `Department Key` | The department or cost centre that owns this asset. Hidden — used for relationship only. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Depreciation Amount` | Monthly depreciation charge for this asset — derived from [Dim] Asset depreciation schedule. This value feeds the depreciation P&L line. |
+| `Accumulated Depreciation To Date` | Total depreciation charged on this asset from acquisition to this month. |
+| `Net Book Value At Month` | Asset's carrying value at the end of this month — Acquisition Cost minus Accumulated Depreciation. |
+| `Depreciation Method` | The method applied — copied from [Dim] Asset. Straight-Line, Declining Balance, or Units of Production. |
+
+---
+
+#### [Fact] Asset Maintenance
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Maintenance ID` | Unique identifier for the maintenance activity (e.g., MNT-2024-00124). |
+| `Maintenance Date` | Date the maintenance was carried out. |
+| `Asset Key` | Links to [Dim] Asset. Hidden — used for relationship only. |
+| `Department Key` | The department responsible for this asset. Hidden — used for relationship only. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Maintenance Type` | Whether this was a Preventive (scheduled), Corrective (fault repair), or Emergency (unplanned breakdown) job. |
+| `Vendor Key` | The external supplier who performed the maintenance. Links to [Dim] Supplier. Hidden. |
+| `Labor Cost` | Cost of labour for this maintenance activity. |
+| `Parts Cost` | Cost of parts and materials used. |
+| `Total Cost` | Total cost of the activity — Labour Cost + Parts Cost. This value feeds the maintenance OPEX line. |
+| `Downtime Hours` | Hours the asset was unavailable due to this maintenance activity. |
+| `Resolution Status` | Current state — Completed, Pending, or Escalated. |
+
+---
+
+#### [Fact] Utility
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month this utility bill covers. |
+| `Geography Key` | The facility location for this utility consumption. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Department Key` | The department or cost centre charged for this utility. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Utility Type` | The type of utility — Electricity, Water, Gas, Internet, or Telecom. |
+| `Units Consumed` | Volume consumed in the relevant unit — kWh for electricity, litres for water, GB for internet. |
+| `Rate Per Unit` | Unit cost of the utility in the reporting currency. |
+| `Amount` | Total utility cost for this type at this location — Units Consumed × Rate Per Unit. This value feeds the utilities OPEX line. |
+
+---
+
+#### [Fact] Tax
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month this tax liability was accrued. |
+| `Business Unit Key` | The legal entity filing this tax. Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Geography Key` | The jurisdiction in which this tax is owed. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Tax Type` | The type of tax — Corporate Income Tax, GST, VAT, or Withholding Tax. |
+| `Taxable Amount` | The base amount on which the tax is calculated. |
+| `Tax Rate` | Applicable tax rate as a proportion (e.g., 0.25 = 25%). |
+| `Tax Amount` | Tax liability for this type and entity — Taxable Amount × Tax Rate. This value feeds the tax P&L line. |
+| `Filing Status` | Whether the return for this period has been Filed, is Pending, or is Under Review. |
+
+---
+
+#### [Fact] Journal Entry
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month this journal entry was posted. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Department Key` | Links to [Dim] Department. Hidden — used for relationship only. |
+| `Geography Key` | Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Account Key` | The leaf P&L account this entry feeds. Links to [Dim] Account. Hidden — used for relationship only. |
+| `Journal Type` | The nature of the posting — Accrual, Provision, Adjustment, Interest, FX, Amortisation, or Other. |
+| `Description` | Plain English description of what this entry represents (e.g., "Monthly interest income accrual", "FX revaluation adjustment"). |
+| `Amount` | The monetary value of this journal entry. Feeds directly to [Fact] Financial for the corresponding account. |
+| `Is Recurring` | "Yes" if this is a standing monthly entry that repeats with a growth or decay trend. "No" for one-off postings. |
+| `Approval Status` | Workflow status — Posted, Pending, or Reversed. |
+
+---
+
+#### [Fact] CapEx
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | Date of the spend event or approval milestone. |
+| `Asset Key` | The asset being constructed or acquired. Links to [Dim] Asset. Hidden — used for relationship only. |
+| `Business Unit Key` | The business unit sponsoring this capital project. Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| `Project Code` | Internal capital project identifier. |
+| `Project Name` | Descriptive name of the capital project. |
+| `Spend Amount` | Actual capital expenditure incurred on this date. |
+| `Approved Budget` | The approved capital budget for this project. |
+| `Budget Utilisation Pct` | Cumulative spend as a proportion of approved budget at this point in the project. |
+| `Spend Category` | Type of capital spend — Construction, Equipment, Software, Land, or Fitout. |
+| `Milestone Status` | Whether this event represents a project milestone — Approved, In Progress, or Completed. |
+
+---
+
+#### [Fact] Operational
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Transaction Date` | Actual calendar date of the operational event. Daily grain — distinguished from the monthly "Date" column in financial fact tables. |
+| `Product Key` | The product, room type, bed category, or service line involved. Links to [Dim] Product. Hidden — used for relationship only. |
+| `Geography Key` | The store, plant, property, or facility location. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Business Unit Key` | Links to [Dim] Business Unit. Hidden — used for relationship only. |
+| `Scenario Key` | Always 1 (Actual). Hidden — used for relationship only. |
+| *(Industry-specific columns)* | Additional columns depend on the industry — e.g., Units Produced and Defective Units for Manufacturing; Occupied Room Nights and Available Room Nights for Hospitality; Patient Visits and Bed Days for Healthcare. These are documented in the dataset's public guide file. |
+
+---
+
+#### [Fact] Macro Event Impact
+
+| Column (Display Name) | Description |
+|----------------------|-------------|
+| `Date` | First day of the month this impact is measured. |
+| `Macro Event Key` | Links to [Dim] Macro Event. Hidden — used for relationship only. |
+| `Account Key` | The P&L account affected by this event. Links to [Dim] Account. Hidden — used for relationship only. |
+| `Geography Key` | The geography where this impact was felt. Links to [Dim] Geography. Hidden — used for relationship only. |
+| `Impact Amount` | Estimated monetary impact of this event on this account in this month — the difference between what Actual would have been without the event and what it actually became. |
+| `Impact Pct` | The impact as a percentage of the baseline (pre-event) amount for this account and period. |
+| `Intensity Level` | Severity of the impact in this specific month — Light, Moderate, or Severe. May differ from the event's overall intensity rating. |
+| `Is Ongoing` | "Yes" if the event's effect on this account was still active in this month. |
+
+---
+
+### Description Application Rules
+
+1. **Every table gets a description.** No exceptions. Even the `Measure` table must carry its description explaining that it contains no data rows, only DAX calculations.
+
+2. **Every non-hidden column gets a description.** Hidden columns (FK keys, hierarchy paths) do not need descriptions since they are invisible to report users.
+
+3. **Hidden columns may optionally carry descriptions** for the benefit of model developers who inspect the BIM file directly. If included, describe their technical purpose.
+
+4. **Industry-specific columns** in [Fact] Operational and in industry-specific dimension tables must be given descriptions generated from the same industry research used to design the dataset. The description must name the unit of measure and explain what the value represents operationally.
+
+5. **Descriptions must be plain English.** No jargon acronyms without explanation on first use. No technical implementation detail (no mention of FK, PATH(), or Python). These descriptions are for finance and business users, not developers.
+
+6. **In the BIM JSON**, descriptions are set as the `"description"` property on each table object and each column object. Measures also accept a `"description"` property — populate it with the business definition of what the measure calculates.
+
+---
+
+## Measure Description Rules
+
+Every measure generated — regardless of industry — must have a `"description"` property set in the BIM file. Descriptions are **generated dynamically** for each measure at build time, not looked up from a fixed catalogue. They are part of the `generate_folder_measures()` output and stored in each measure's `pattern["description"]` field.
+
+### Description Generation — What the Script Must Produce for Every Measure
+
+Each description is generated by combining three elements:
+
+```python
+def build_measure_description(measure_name, folder_label, industry,
+                               business_question, direction_note, benchmark=None):
+    """
+    Generates a BIM-ready description for a measure.
+    Always answers: what does it measure, which direction is good, is there a benchmark.
+    Max 60 words — descriptions appear as tooltips in the Power BI field list.
+    """
+    parts = [business_question.rstrip(".")]
+    if direction_note:
+        parts.append(direction_note.rstrip("."))
+    if benchmark:
+        parts.append(benchmark.rstrip("."))
+    return ". ".join(parts) + "."
+```
+
+**Element 1 — Business question** (always first): what the measure answers, in the active voice.
+Not "Calculates X divided by Y" — that describes the formula. Instead: "Measures how efficiently the plant converts raw material into saleable output."
+
+**Element 2 — Direction note** (always for ratios and percentages): whether higher or lower is better and what a movement signals.
+"A rising rate indicates improving customer retention." / "Lower values signal cost pressure from procurement."
+
+**Element 3 — Industry benchmark** (include when a widely recognised standard exists):
+"World-class OEE is considered to be above 85%." / "NIM above 3% is generally considered healthy for Indian commercial banks."
+
+### Description Rules — Apply to Every Measure in Every Industry
+
+| Rule | Requirement |
+|------|-------------|
+| Business-first | First sentence states what it answers, not how it's computed |
+| No formula language | Never use "divides", "sums", "calculates", "returns" |
+| No generic labels | Never write "This measure shows the value of [Measure Name]" |
+| Direction for all ratios | Every % and ratio measure states whether higher or lower is better |
+| Benchmark when known | Include the industry-standard benchmark figure where one exists |
+| Max 60 words | Descriptions must be scannable as tooltips |
+| Industry vocabulary | Use the terminology the selected persona uses — not generic finance labels |
+| Scenario names | Use the actual scenario names from DimScenario, not "Actual" or "Plan" |
+
+### Description Examples by Industry
+
+These show the required quality and style. All actual descriptions are generated at build time, not copied from here.
+
+**B2B SaaS — MRR (folder: 01 | Subscription Revenue)**
+> Monthly Recurring Revenue — total subscription income recognised in the selected month. The primary health metric for the business: it tracks only the predictable, renewing portion of revenue. Rising MRR indicates new customer acquisition or expansion; falling MRR signals churn.
+
+**Healthcare — Bed Occupancy Rate % (folder: 03 | Capacity & Utilisation)**
+> Proportion of available beds that were occupied in the selected period. The primary capacity utilisation metric for inpatient facilities. Higher occupancy generates more revenue per fixed cost base, but sustained occupancy above 85% creates patient flow risk and limits flexibility for emergency admissions.
+
+**Manufacturing — OEE % (folder: 02 | Quality & Yield)**
+> Actual good units produced as a percentage of the theoretical maximum if equipment ran at full speed with zero downtime and zero defects. Combines availability, performance, and quality into a single efficiency score. World-class manufacturing typically targets OEE above 85%.
+
+**Banking — NIM % (folder: 01 | Interest Income & NIM)**
+> Net interest income as a percentage of average earning assets. Measures how efficiently the bank converts its balance sheet into spread income after funding costs. A narrowing NIM indicates margin compression from rising deposit rates or competitive loan pricing.
+
+**Hospitality — RevPAR (folder: 01 | Room Revenue & Rate)**
+> Total room revenue divided by all available room nights, including unsold rooms. Combines occupancy and rate into one number — the hotel industry's primary revenue benchmark. Higher RevPAR relative to the competitive set indicates stronger demand or superior rate management.
+
+**Retail — Sell-Through Rate % (folder: 04 | Inventory & Sell-Through)**
+> Units sold as a proportion of total units available — sold plus on hand. Measures how effectively stock is being converted into revenue before it becomes aged inventory. A declining rate signals demand weakness or over-buying and may indicate future markdown exposure.
+
+**Logistics — On-Time Delivery Rate % (folder: 02 | Delivery Performance)**
+> Shipments delivered on or before the promised date as a percentage of total deliveries. The primary service quality metric — directly tied to customer satisfaction scores, contract SLA compliance, and penalty exposure. Sustained rates below 95% typically trigger customer escalation.
+
+### Navigation & Labels — Fixed Descriptions (Same in All Industries)
+
+The `[Last] | Navigation & Labels` folder is the only folder with descriptions that do not change by industry. These measures are purely contextual and have no industry-specific meaning:
+
+| Measure | Description |
+|---------|-------------|
+| `Report Refreshed` | Date and time the dataset was last refreshed. Use in report headers so readers know how current the data is. |
+| `Selected Period` | Returns the selected month label when one month is chosen in the date slicer; "Multiple Periods" when more than one is selected. Use in page titles to make the time context explicit. |
+| `Selected Scenario` | Returns the active scenario name when one scenario is selected in the slicer. Use in card headings to confirm which scenario is being displayed. |
+| `Latest Data Month` | The most recent month for which Actual data is loaded, formatted as "MMM YYYY". Use in dashboard subtitles to communicate data freshness. |
+| `No Data Message` | Returns a friendly message when the current filter combination returns no data. Use in card visuals to avoid blank placeholders. |
+
+---
+
+<!--
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  END OF REFERENCE FILE — PLANNING / FINANCIAL DATASETS
+  Part of Enterprise PBIX Model Builder v3.0
+  ─────────────────────────────────────────────────────────────────────────
+  © 2026 Logeshkumar Sivakumar. All rights reserved.
+
+  This reference file is the original intellectual property of
+  Logeshkumar Sivakumar. It may not be reproduced, redistributed,
+  resold, or published in any form without explicit written permission.
+
+  See SKILL.md for universal BIM rules and references/non-planning.md
+  for non-planning/chart-showcase datasets.
+
+  Designed & Developed by : Logeshkumar Sivakumar
+  Contact                 : elogu2001@outlook.com
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-->
